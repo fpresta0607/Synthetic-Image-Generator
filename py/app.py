@@ -8,38 +8,52 @@ import os
 import glob
 import time
 import zipfile
+import concurrent.futures
+import shutil
 from typing import List, Dict, Any, Optional, Tuple
 
-import numpy as np
-from flask import Flask, request, send_file, Response, stream_with_context, jsonify
-from PIL import Image
-from skimage import color, filters, morphology, measure, segmentation, util
-from skimage.filters import gaussian
-from werkzeug.utils import secure_filename
+import numpy as np  # type: ignore
+from flask import Flask, request, send_file, Response, stream_with_context, jsonify  # type: ignore
+from PIL import Image  # type: ignore
+from skimage import color, filters, morphology, measure, segmentation, util  # type: ignore
+from skimage.filters import gaussian  # type: ignore
+from werkzeug.utils import secure_filename  # type: ignore
+from typing import TYPE_CHECKING, Any
+
+# Predeclare optional third-party objects for type checkers
+sam_model_registry: Any = None  # type: ignore
+SamPredictor: Any = None  # type: ignore
+torch: Any = None  # type: ignore
 
 # Optional SAM imports (lazy). If not installed, SAM endpoints will return 501.
 # Try HQ-SAM first (higher quality), fall back to regular SAM
-try:
-    from segment_anything_hq import sam_model_registry, SamPredictor  # type: ignore
+try:  # Attempt HQ-SAM first
+    from segment_anything_hq import sam_model_registry as _smr_hq, SamPredictor as _SP_hq  # type: ignore
     import torch  # type: ignore
+    sam_model_registry = _smr_hq
+    SamPredictor = _SP_hq
     _SAM_AVAILABLE = True
     _USING_HQ_SAM = True
 except Exception:
-    try:
-        from segment_anything import sam_model_registry, SamPredictor  # type: ignore
+    try:  # Fallback regular SAM
+        from segment_anything import sam_model_registry as _smr, SamPredictor as _SP  # type: ignore
         import torch  # type: ignore
+        sam_model_registry = _smr
+        SamPredictor = _SP
         _SAM_AVAILABLE = True
         _USING_HQ_SAM = False
     except Exception:  # pragma: no cover
         _SAM_AVAILABLE = False
         _USING_HQ_SAM = False
+        sam_model_registry = None  # type: ignore
+        SamPredictor = None  # type: ignore
 
 # ---------------------------------------------------------------------------
 # In-memory session store for SAM-derived components
 # ---------------------------------------------------------------------------
 _SESSION_LOCK = threading.Lock()
 _SESSIONS: Dict[str, Dict[str, Any]] = {}
-_SAM_PREDICTOR: Optional["SamPredictor"] = None
+_SAM_PREDICTOR: Optional[Any] = None  # SamPredictor instance when loaded
 _SAM_MODEL_ID: Optional[str] = None
 
 # ---------------------------------------------------------------------------
@@ -54,13 +68,52 @@ def _get_default_model_type():
 # ---------------------------------------------------------------------------
 # SAM Embedding Cache (Performance optimization: 3-5x speedup)
 # ---------------------------------------------------------------------------
-_EMBEDDING_CACHE: Dict[str, Any] = {}  # {image_hash: embedding_features}
+_EMBEDDING_CACHE: Dict[str, Any] = {}  # {cache_key: embedding_features}
+
+# ---------------------------------------------------------------------------
+# Performance / configuration knobs (override via environment variables)
+# ---------------------------------------------------------------------------
+MAX_WORKERS = int(os.environ.get('GEN_MAX_WORKERS', '1'))  # >1 not yet using separate predictors
+PRECOMPUTE_ENABLED = os.environ.get('PRECOMPUTE_EMBEDDINGS', '1') == '1'
+DOWNSCALE_MAX = int(os.environ.get('DOWNSCALE_MAX', '1600'))  # Default 1600px longer side
+SAM_FP16 = os.environ.get('SAM_FP16', '0') == '1'
+OUTPUT_FORMAT = os.environ.get('OUTPUT_FORMAT', 'WEBP').upper()  # Default WEBP for faster transfer
+PNG_COMPRESS_LEVEL = int(os.environ.get('PNG_COMPRESS_LEVEL', '2'))  # 0 fastest 9 slowest
+WEBP_QUALITY = int(os.environ.get('WEBP_QUALITY', '88'))
+EMBED_CACHE_MAX = int(os.environ.get('EMBED_CACHE_MAX', '1000'))
+MAX_IMAGES_PER_DATASET = int(os.environ.get('MAX_IMAGES_PER_DATASET', '150'))
+MAX_FILE_MB = int(os.environ.get('MAX_FILE_MB', '40'))
+DATASET_TTL_HOURS = float(os.environ.get('DATASET_TTL_HOURS', '6'))
+_LAST_CLEAN_CHECK = 0.0
+
+def _evict_embedding_cache_if_needed():
+    if EMBED_CACHE_MAX and len(_EMBEDDING_CACHE) > EMBED_CACHE_MAX:
+        remove_n = len(_EMBEDDING_CACHE) - EMBED_CACHE_MAX
+        for k in list(_EMBEDDING_CACHE.keys())[:remove_n]:
+            _EMBEDDING_CACHE.pop(k, None)
 
 def _ensure_datasets_dir() -> str:
     path = 'tmp_datasets'
     if not os.path.exists(path):
         os.makedirs(path, exist_ok=True)
     return path
+
+def _maybe_cleanup_datasets():
+    """Remove dataset dirs older than DATASET_TTL_HOURS (runs periodically)."""
+    global _LAST_CLEAN_CHECK
+    now = time.time()
+    if now - _LAST_CLEAN_CHECK < 300:  # every 5 minutes
+        return
+    _LAST_CLEAN_CHECK = now
+    ttl = DATASET_TTL_HOURS * 3600
+    root = _ensure_datasets_dir()
+    for d in os.listdir(root):
+        full = os.path.join(root, d)
+        try:
+            if os.path.isdir(full) and (now - os.path.getmtime(full)) > ttl:
+                shutil.rmtree(full, ignore_errors=True)
+        except Exception:
+            pass
 
 def _predict_sam_mask(arr: np.ndarray, norm_points: List[Dict[str,Any]], cache_key: Optional[str] = None):
     """Predict SAM mask with embedding cache for 3-5x speedup."""
@@ -175,9 +228,11 @@ def _load_sam_model(model_type: Optional[str] = None, checkpoint_path: Optional[
             'vit_h': 'models/sam_vit_h.pth'
         }
     checkpoint_path = env_ckpt or checkpoint_path or default_paths.get(model_type, default_paths.get('vit_t', 'models/sam_vit_t.pth'))
+    if checkpoint_path is None:
+        return False
     
     # If the provided checkpoint doesn't exist, try glob fallbacks
-    if not os.path.exists(checkpoint_path):
+    if not os.path.exists(checkpoint_path):  # type: ignore[arg-type]
         # Try model-specific patterns first (prioritize HQ-SAM)
         patterns = [
             f'models/sam_hq_{model_type}*.pth',  # HQ-SAM specific
@@ -206,10 +261,16 @@ def _load_sam_model(model_type: Optional[str] = None, checkpoint_path: Optional[
         print(f"[SAM] Checkpoint not found at '{checkpoint_path}'. Set SAM_CHECKPOINT env var or place file at models/sam_vit_b.pth")
         return False
     try:
-        sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        sam = sam_model_registry[model_type](checkpoint=checkpoint_path)  # type: ignore[index]
+        device = 'cuda' if (torch and torch.cuda.is_available()) else 'cpu'
         sam.to(device)
-        _SAM_PREDICTOR = SamPredictor(sam)
+        if device == 'cuda' and SAM_FP16:
+            try:
+                sam.half()
+                print('[SAM] Using half precision fp16')
+            except Exception as _e:  # pragma: no cover
+                print('[SAM] fp16 not applied:', _e)
+        _SAM_PREDICTOR = SamPredictor(sam)  # type: ignore[call-arg]
         _SAM_MODEL_ID = f"{model_type}:{checkpoint_path}:{device}"
         package_name = "HQ-SAM" if _USING_HQ_SAM else "SAM"
         print(f"[{package_name}] Loaded model '{model_type}' from {checkpoint_path} on {device}")
@@ -275,8 +336,37 @@ def to_png_bytes(arr: np.ndarray) -> bytes:
     if arr.dtype != np.uint8:
         arr = np.clip(arr, 0, 255).astype(np.uint8)
     img = Image.fromarray(arr)
-    buf = io.BytesIO(); img.save(buf, format='PNG'); buf.seek(0)
+    buf = io.BytesIO(); img.save(buf, format='PNG', compress_level=PNG_COMPRESS_LEVEL)
+    buf.seek(0)
     return buf.read()
+
+def _maybe_downscale(arr: np.ndarray) -> np.ndarray:
+    if DOWNSCALE_MAX <= 0:
+        return arr
+    h, w = arr.shape[:2]
+    m = max(h, w)
+    if m <= DOWNSCALE_MAX:
+        return arr
+    scale = DOWNSCALE_MAX / m
+    new_w = int(w * scale); new_h = int(h * scale)
+    try:
+        import cv2  # type: ignore
+        return cv2.resize(arr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    except Exception:
+        # Fallback to PIL if cv2 not available
+        return np.array(Image.fromarray(arr).resize((new_w, new_h), Image.BILINEAR))
+
+def _output_image_bytes(arr: np.ndarray) -> bytes:
+    if arr.dtype != np.uint8:
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+    img = Image.fromarray(arr)
+    buf = io.BytesIO()
+    if OUTPUT_FORMAT == 'WEBP':
+        img.save(buf, format='WEBP', quality=WEBP_QUALITY, method=4)
+    else:
+        img.save(buf, format='PNG', compress_level=PNG_COMPRESS_LEVEL)
+    buf.seek(0)
+    return buf.getvalue()
 
 def apply_edits(img: np.ndarray, object_mask: np.ndarray, comp_mask: np.ndarray, edits: List[Dict[str, Any]]):
     if not edits:
@@ -793,6 +883,20 @@ def dataset_init():
         outp = os.path.join(ds_dir, fn)
         f.save(outp)
         collected.append(outp)
+    # Enforce max images limit early
+    if len(collected) > MAX_IMAGES_PER_DATASET:
+        try: shutil.rmtree(ds_dir, ignore_errors=True)
+        except Exception: pass
+        return {'error': f'max_images_exceeded:{len(collected)}/{MAX_IMAGES_PER_DATASET}'}, 400
+    # Filter oversized files
+    filtered = []
+    for p in collected:
+        try:
+            if os.path.getsize(p) <= MAX_FILE_MB * 1024 * 1024:
+                filtered.append(p)
+        except Exception:
+            continue
+    collected = filtered
     images_meta = []
     for p in collected:
         try:
@@ -802,6 +906,7 @@ def dataset_init():
         except Exception:
             continue
     _DATASETS[ds_id] = {'images': images_meta, 'templates': {}, 'created_at': time.time()}
+    _maybe_cleanup_datasets()
     return {'dataset_id': ds_id, 'images': [{'id':m['id'],'filename':m['filename'],'thumb_b64':m['thumb_b64']} for m in images_meta]}
 
 @app.route('/sam/dataset/template/save', methods=['POST'])
@@ -853,7 +958,7 @@ def dataset_point_preview():
     
     try:
         img = Image.open(img_meta['path']).convert('RGB')
-        arr = np.array(img)
+        arr = _maybe_downscale(np.array(img))
         
         # Optional downscale for preview speed (keeps aspect ratio, uses proper interpolation)
         # Previous implementation used np.resize which merely reshaped/repeated data and produced
@@ -882,7 +987,7 @@ def dataset_point_preview():
         # Encode mask as PNG (grayscale 0/255)
         mask_img = Image.fromarray((mask*255).astype(np.uint8), mode='L')
         buf = io.BytesIO()
-        mask_img.save(buf, format='PNG')
+        mask_img.save(buf, format='PNG', compress_level=1)
         return {
             'mask_png': base64.b64encode(buf.getvalue()).decode('ascii'),
             'score': float(score) if score else 0.0
@@ -988,6 +1093,38 @@ def _apply_templates_with_class_filter(arr: np.ndarray, templates: Dict[str, Dic
         cumulative = mask if cumulative is None else (cumulative | mask)
     return out, cumulative
 
+def _precompute_embeddings(ds_id: str, ds: Dict[str, Any]):
+    if not PRECOMPUTE_ENABLED:
+        return 0
+    if _SAM_PREDICTOR is None and not _load_sam_model():
+        return 0
+    predictor = _SAM_PREDICTOR
+    assert predictor is not None
+    count = 0
+    for im in ds['images']:
+        key = f"{ds_id}_gen_{im['id']}"
+        if key in _EMBEDDING_CACHE:
+            continue
+        try:
+            arr = _maybe_downscale(np.array(Image.open(im['path']).convert('RGB')))
+            predictor.set_image(arr)
+            _EMBEDDING_CACHE[key] = predictor.features
+            count += 1
+        except Exception as e:  # pragma: no cover
+            print('[precompute] skip', im.get('path'), e)
+    print(f"[precompute] cached embeddings for {count} images (total keys={len(_EMBEDDING_CACHE)})")
+    return count
+
+@app.route('/sam/dataset/precompute', methods=['POST'])
+def dataset_precompute():
+    data = request.get_json(force=True, silent=True) or {}
+    ds_id = data.get('dataset_id')
+    if not ds_id: return {'error':'dataset_id_required'}, 400
+    ds = _DATASETS.get(ds_id)
+    if not ds: return {'error':'dataset_not_found'}, 404
+    added = _precompute_embeddings(ds_id, ds)
+    return {'cached_added': added, 'total_cache': len(_EMBEDDING_CACHE)}
+
 @app.route('/sam/dataset/apply_stream', methods=['POST'])
 def dataset_apply_stream():
     payload = request.get_json(force=True, silent=True) or {}
@@ -1001,6 +1138,9 @@ def dataset_apply_stream():
         return {'error':'sam_model_not_loaded'}, 500
     images = ds['images']
     if not ds['templates']: return {'error':'no_templates'}, 400
+    if PRECOMPUTE_ENABLED:
+        _precompute_embeddings(ds_id, ds)
+
     def _stream():
         total = len(images)
         for idx, im in enumerate(images):
@@ -1008,14 +1148,14 @@ def dataset_apply_stream():
             out = {'index': idx, 'total': total, 'filename': im['filename'], 'image_id': im['id']}
             try:
                 img = Image.open(im['path']).convert('RGB')
-                arr = np.array(img)
+                arr = _maybe_downscale(np.array(img))
                 # Apply templates with class filtering - use cache key for embedding reuse
                 cache_key = f"{ds_id}_gen_{im['id']}"
                 edited, cum_mask = _apply_templates_with_class_filter(arr, ds['templates'], edits, im['filename'], cache_key=cache_key)
-                buf = io.BytesIO(); Image.fromarray(edited).save(buf, format='PNG')
-                out['variant_png'] = base64.b64encode(buf.getvalue()).decode('ascii')
+                out_bytes = _output_image_bytes(edited)
+                out['variant_png'] = base64.b64encode(out_bytes).decode('ascii')
                 if export_mask and cum_mask is not None:
-                    mb = io.BytesIO(); Image.fromarray((cum_mask*255).astype(np.uint8)).save(mb, format='PNG')
+                    mb = io.BytesIO(); Image.fromarray((cum_mask*255).astype(np.uint8)).save(mb, format='PNG', compress_level=1)
                     out['mask_png'] = base64.b64encode(mb.getvalue()).decode('ascii')
                 out['ms'] = int((time.time()-start)*1000)
             except Exception as e:
@@ -1026,4 +1166,18 @@ def dataset_apply_stream():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    # Production-friendly startup: attempt early model load & optional precompute warm (without blocking long)
+    warm = os.environ.get('WARM_MODEL', '1') == '1'
+    if warm:
+        _load_sam_model()
+    use_waitress = True
+    if use_waitress:
+        try:
+            from waitress import serve  # type: ignore
+            print('[server] Starting Waitress (production mode, debug off)')
+            serve(app, host='0.0.0.0', port=5001)
+        except Exception as e:
+            print('[server] Waitress unavailable, falling back to Flask dev server:', e)
+            app.run(host='0.0.0.0', port=5001, debug=False)
+    else:
+        app.run(host='0.0.0.0', port=5001, debug=False)
