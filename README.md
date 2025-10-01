@@ -275,4 +275,5 @@ services:
 - [ ] Logs retained & rotated
 
 ## License
-MIT (add a LICENSE file if needed).
+MIT (add a LICENSE file if needed).#   S y n t h e t i c - I m a g e - G e n e r a t o r  
+ 
