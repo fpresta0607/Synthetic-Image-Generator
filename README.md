@@ -20,6 +20,21 @@ This project now focuses on a single interactive workflow powered by Segment Any
 Python service dependencies pinned in `py/requirements.txt`.
 Node dependencies listed in `server/package.json`.
 
+### Model Weights / `models/` Directory
+The `py/models` (or top-level `models`) directory is ignored by git (large files). You must manually place a SAM checkpoint there before running in production:
+
+```
+py/models/sam_vit_b.pth
+```
+
+Or set an explicit environment variable:
+
+```
+SAM_CHECKPOINT=/absolute/path/to/sam_vit_b.pth
+```
+
+If the checkpoint is missing the backend will load but `/sam/init` will respond with an error until the file is present.
+
 ## Quick Start (Cross‑Platform)
 
 You now have two options:
@@ -48,6 +63,8 @@ npm run dev:win
 Then open: http://localhost:3000
 
 Upload an image, click "Init SAM", add 1–3 positive points (left click) and optional negative points (right click or Shift+left), select a candidate mask, save it, adjust sliders, and Apply.
+
+If you see a model load error, confirm the checkpoint path (see Model Weights section).
 
 ### Manual Setup (If you prefer explicit steps)
 
@@ -129,6 +146,133 @@ curl -H "Content-Type: application/json" -d $applyReq http://localhost:5001/sam/
 
 ### Front-End Status
 The front-end is SAM-only: classical segmentation UI has been removed.
+
+## Production Deployment
+
+You will run two processes (Python SAM backend + Node static/proxy) behind an optional reverse proxy (NGINX, Caddy, etc.). Below are minimal approaches.
+
+### 1. Environment Variables
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `SAM_CHECKPOINT` | Absolute path to SAM weight file | `models/sam_vit_b.pth` search fallback |
+| `PY_SERVICE_URL` (Node) | URL Node uses to reach Flask | `http://localhost:5001` |
+| `PORT` (Node) | Node listen port | `3000` |
+| `FLASK_PORT` | (Optional) Flask listen port | `5001` |
+| `FLASK_HOST` | (Optional) Bind host | `0.0.0.0` |
+| `PYTHONUNBUFFERED` | Real-time logs | (unset) |
+
+### 2. Python Service (Production Style)
+Create (or reuse) a virtualenv, install deps, and run with a WSGI/ASGI server for robustness. The current app is a simple Flask instance; using `gunicorn` with workers is suggested for concurrent requests (SAM inference is heavy, so start with 1–2 workers; more may duplicate model memory use).
+
+Example (Linux/macOS):
+```bash
+cd py
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-sam.txt
+pip install gunicorn
+export SAM_CHECKPOINT=/opt/models/sam_vit_b.pth
+export FLASK_HOST=0.0.0.0
+export FLASK_PORT=5001
+gunicorn -w 1 -b 0.0.0.0:5001 app:app
+```
+
+On Windows (PowerShell) use `pip install waitress` instead of gunicorn:
+```powershell
+cd py
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements-sam.txt
+pip install waitress
+$env:SAM_CHECKPOINT="C:\\models\\sam_vit_b.pth"
+python -m waitress --listen=0.0.0.0:5001 app:app
+```
+
+### 3. Node Proxy (Production Build)
+The UI is static so you can serve directly via Node (`express`) or any static server (NGINX). Current Node service also proxies SAM API calls, so keep it if you want a single origin.
+
+```bash
+cd server
+npm ci --only=production
+PORT=3000 PY_SERVICE_URL=http://localhost:5001 node server.js
+```
+
+### 4. Reverse Proxy (Optional NGINX Snippet)
+```nginx
+server {
+	listen 80;
+	server_name your.domain.tld;
+
+	location /sam/ { # Direct to Python if you want to bypass Node proxy
+		proxy_pass http://127.0.0.1:5001;
+		proxy_set_header Host $host;
+	}
+
+	location /api/ {
+		proxy_pass http://127.0.0.1:3000;
+		proxy_set_header Host $host;
+	}
+
+	location / {
+		proxy_pass http://127.0.0.1:3000;
+		proxy_set_header Host $host;
+		add_header Cache-Control "no-store";
+	}
+}
+```
+
+If using only the Node proxy, you can omit the direct `/sam/` block.
+
+### 5. Docker (Outline Only)
+You can containerize both services or keep separate images:
+1. Base image with Python + model weights volume.
+2. Node image serving static and proxy.
+3. Use docker-compose to join networks.
+
+Suggested volume mount for weights:
+```yaml
+volumes:
+	sam_models:
+
+services:
+	sam:
+		image: python:3.11-slim
+		volumes:
+			- sam_models:/app/models
+		environment:
+			- SAM_CHECKPOINT=/app/models/sam_vit_b.pth
+```
+
+### 6. Health & Readiness
+- Python: `GET /health` returns `{ status: 'ok', sam_loaded: bool }` (add a readiness probe that waits for `sam_loaded: true` if you preload the model after container start).
+- Node: `GET /health` returns `{ status: 'ok' }`.
+
+### 7. Scaling Considerations
+- SAM model memory: each Python worker loads the full model; scale vertically before horizontally.
+- Add an LRU cache keyed by image hash if repeated inits are common.
+- Enable HTTP keep-alive / compression at the reverse proxy layer.
+
+### 8. Security / Hardening
+- Restrict file size on upload (multer limit) to avoid huge images.
+- Serve over HTTPS (proxy termination).
+- Optionally require an API token header checked in Node before proxy.
+
+### 9. Logging & Monitoring
+- Add structured logging (JSON) for `/sam/*` latency.
+- Track mask selection frequency, edit usage patterns for optimization.
+
+### 10. GPU Deployment
+- Install CUDA-enabled torch wheel matching your GPU.
+- Set `TORCH_CUDA_ARCH_LIST` appropriately in container builds for smaller binaries.
+
+## Minimal Production Checklist
+- [ ] SAM checkpoint present / env var set
+- [ ] Python service supervisored (systemd, gunicorn, or waitress)
+- [ ] Node proxy running with `PY_SERVICE_URL` correctly pointing to Python
+- [ ] Reverse proxy (optional) forwarding 80/443 → Node
+- [ ] Health endpoints monitored
+- [ ] Upload size limits enforced
+- [ ] Logs retained & rotated
 
 ## License
 MIT (add a LICENSE file if needed).

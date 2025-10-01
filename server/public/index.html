@@ -11,27 +11,36 @@
     <h1>SAM Interactive Segmentation</h1>
     <p class="tagline">Upload → Add Points → Pick Mask → Save Component → Adjust → Apply</p>
   </header>
-  <main>
-    <section class="panel" id="samPanel" aria-labelledby="samHeading">
-      <h2 id="samHeading">Steps</h2>
-      <ol class="steps">
-        <li><strong>Upload</strong> an image.</li>
-        <li><strong>Init SAM</strong>.</li>
-        <li><strong>Click</strong> positive (left) and negative (right / Shift+Click) points.</li>
-        <li><strong>Select</strong> a candidate mask.</li>
-        <li><strong>Name & Save</strong> it.</li>
-        <li><strong>Adjust</strong> component sliders.</li>
-        <li><strong>Apply & Download</strong>.</li>
-      </ol>
+  <main class="wizard">
+    <aside id="helpPanel" class="help-panel" aria-live="polite">
+      <h3>Help</h3>
+      <div id="helpContent">Step 1: Upload an image to begin.</div>
+      <div class="phase-indicator"><span id="phaseLabel">Upload</span></div>
+    </aside>
+    <!-- Phase 1: Upload / Init -->
+    <section class="panel phase active" id="phase1" data-phase="1" aria-labelledby="phase1Heading">
+      <h2 id="phase1Heading">Phase 1 · Upload</h2>
+      <p class="phase-desc">Choose an image and initialize the SAM model. This prepares embeddings for interactive segmentation.</p>
       <div class="controls-row">
         <label class="file-label">Image
           <input type="file" id="imageInput" accept="image/*" />
         </label>
-        <button id="samInitBtn" disabled>Init SAM</button>
+        <button id="samInitBtn" disabled>Init & Continue →</button>
+        <span id="samStatus" class="status" aria-live="polite"></span>
+      </div>
+      <div class="phase-nav single">
+        <span class="hint">Model must load once per server start. Ensure checkpoint exists.</span>
+      </div>
+    </section>
+
+    <!-- Phase 2: Point Prompt & Component Saving -->
+    <section class="panel phase" id="phase2" data-phase="2" aria-labelledby="phase2Heading" hidden>
+      <h2 id="phase2Heading">Phase 2 · Segment & Save Components</h2>
+      <p class="phase-desc">Add positive (left click) and negative (right / Shift+Click) points to refine masks. Save each distinct object you want to edit later.</p>
+      <div class="seg-controls">
         <button id="samUndoBtn" disabled title="Undo last point (U)">Undo</button>
         <button id="samClearBtn" disabled title="Clear all points (Esc)">Clear</button>
         <button id="samRefreshBtn" disabled title="Re-run segmentation">Re-Segment</button>
-        <span id="samStatus" class="status" aria-live="polite"></span>
         <span id="samPointSummary" class="point-summary" aria-live="polite"></span>
       </div>
       <div class="layout-grid">
@@ -53,26 +62,59 @@
             <input type="text" id="samComponentName" placeholder="Component name" aria-label="Component name" />
             <button id="samSaveBtn" disabled>Save</button>
           </div>
-          <div class="hint compact">Save multiple masks; each gets its own sliders.</div>
+          <div class="hint compact">Save each region you plan to edit in Phase 3.</div>
         </div>
         <div class="block">
-          <h3 class="block-title">Result</h3>
-          <img id="samEditedImg" alt="Edited output" class="result-img" />
-          <div class="sam-apply">
-            <button id="samApplyBtn" disabled>Apply Edits</button>
-            <button id="samDownloadBtn" disabled>Download</button>
-            <span id="samApplyStatus" class="status" aria-live="polite"></span>
+          <h3 class="block-title">Saved Components</h3>
+          <div id="samSavedList" class="saved-components" aria-live="polite">None yet.</div>
+        </div>
+      </div>
+      <div class="phase-nav">
+        <button id="backToUpload" class="secondary">← Back</button>
+        <button id="toEditPhase" class="primary" disabled>Continue to Edits →</button>
+      </div>
+    </section>
+
+    <!-- Phase 3: Qualitative Editing -->
+    <section class="panel phase" id="phase3" data-phase="3" aria-labelledby="phase3Heading" hidden>
+      <h2 id="phase3Heading">Phase 3 · Qualitative Adjustments</h2>
+      <p class="phase-desc">Apply human‑friendly tweaks to each saved component. Values represent relative changes; small adjustments are often enough.</p>
+      <div class="layout-grid single-col">
+        <div class="block">
+          <h3 class="block-title">Components</h3>
+          <div id="samComponentsPanel" class="sam-components-panel" aria-live="polite"></div>
+          <div id="samEditsList" class="edits-grid" aria-live="polite"></div>
+          <div class="qual-legend">
+            <ul>
+              <li><strong>Darker / Lighter</strong> → brightness (adds or subtracts light)</li>
+              <li><strong>Flatter / Punchier</strong> → contrast (compresses or expands tonal range)</li>
+              <li><strong>Lift Shadows / Deepen Shadows</strong> → gamma (perceived midtone shift)</li>
+              <li><strong>Vivid / Muted</strong> → saturation (color intensity)</li>
+              <li><strong>Rotate Hue</strong> → hue (cycle colors)</li>
+              <li><strong>Sharper / Softer</strong> → sharpen (edge emphasis)</li>
+              <li><strong>Texture</strong> → noise (adds subtle grain)</li>
+              <li><strong>Opacity</strong> → opacity (blend with original)</li>
+            </ul>
+          </div>
+          <div class="result-block">
+            <h3 class="block-title">Preview Result</h3>
+            <img id="samEditedImg" alt="Edited output" class="result-img" />
+            <div class="sam-apply">
+              <button id="samApplyBtn" disabled>Apply All</button>
+              <button id="samDownloadBtn" disabled>Download</button>
+              <span id="samApplyStatus" class="status" aria-live="polite"></span>
+            </div>
           </div>
         </div>
       </div>
-      <div class="sam-components-panel" id="samComponentsPanel" hidden>
-        <h3>Saved Components</h3>
-        <div id="samSavedList" class="saved-components" aria-live="polite">None yet.</div>
-        <h3>Edit Sliders</h3>
-        <div id="samEditsList" class="edits-grid" aria-live="polite"></div>
-        <div class="edit-hint">Neutral: Bright 0 · Contrast 0 · Gamma 0 · Hue 0° · Sat 0 · Sharpen 0 · Noise 0. Small |value| < 0.15 is subtle.</div>
+      <div class="phase-nav">
+        <button id="backToSegment" class="secondary">← Back</button>
       </div>
     </section>
   </main>
   <footer>
-    <span>Keyboard: 1/2/3 pick candidate · U undo · Esc clear.</span
+    <span>Keyboard: 1/2/3 pick candidate · U undo · Esc clear.</span>
+  </footer>
+  <script src="script.js" type="module"></script>
+</body>
+</html>

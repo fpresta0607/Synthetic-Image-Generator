@@ -366,4 +366,23 @@ def sam_apply():
             opacity_val = max(0.0, min(1.0, opacity_val))
             if opacity_val < 1.0:
                 region = mask
-                blended = (opacity_val * converted[region].astype(np.float32) + (1-opacity_val) * prev[region].astype(np.float
+                blended = (opacity_val * converted[region].astype(np.float32) + (1-opacity_val) * prev[region].astype(np.float32)).astype(np.uint8)
+                converted[region] = blended
+        out = converted
+    png_bytes = to_png_bytes(out)
+    resp_obj: Dict[str, Any] = {'image_id': image_id}
+    resp_obj['variant_png'] = base64.b64encode(png_bytes).decode('ascii')
+    if export_mask and edits:
+        # If single component, export its mask; else skip
+        if len(edits) == 1:
+            cid = edits[0].get('component_id')
+            comp = sess['components'].get(cid)
+            if comp:
+                mask_img = Image.fromarray((comp['mask']*255).astype(np.uint8), mode='L')
+                buf = io.BytesIO(); mask_img.save(buf, format='PNG'); buf.seek(0)
+                resp_obj['component_mask_png'] = base64.b64encode(buf.read()).decode('ascii')
+    return resp_obj
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5001, debug=True)

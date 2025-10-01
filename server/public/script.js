@@ -1,4 +1,13 @@
+// Phase elements
 const imageInput = document.getElementById('imageInput');
+const phase1 = document.getElementById('phase1');
+const phase2 = document.getElementById('phase2');
+const phase3 = document.getElementById('phase3');
+const phaseLabel = document.getElementById('phaseLabel');
+const backToUpload = document.getElementById('backToUpload');
+const toEditPhase = document.getElementById('toEditPhase');
+const backToSegment = document.getElementById('backToSegment');
+// Legacy reference kept if needed
 const samPanel = document.getElementById('samPanel');
 const samInitBtn = document.getElementById('samInitBtn');
 const samUndoBtn = document.getElementById('samUndoBtn');
@@ -18,7 +27,7 @@ const samApplyBtn = document.getElementById('samApplyBtn');
 const samDownloadBtn = document.getElementById('samDownloadBtn');
 const samApplyStatus = document.getElementById('samApplyStatus');
 const samEditedImg = document.getElementById('samEditedImg');
-const helpBox = document.getElementById('helpBox');
+const helpContent = document.getElementById('helpContent');
 const samPointSummary = document.getElementById('samPointSummary');
 
 let currentFile = null;
@@ -32,7 +41,15 @@ let samActiveSaved = null; // component id
 let samEditsMap = {}; // component_id -> edits object
 
 // Utility: update contextual help
-function setHelp(msg){ if(helpBox) helpBox.textContent = msg; }
+function setHelp(msg){ if(helpContent) helpContent.textContent = msg; }
+
+function showPhase(n){
+  [phase1, phase2, phase3].forEach(p=>{ if(p){ const isTarget = p.dataset.phase === String(n); p.hidden = !isTarget; p.classList.toggle('active', isTarget); }});
+  if(phaseLabel){ phaseLabel.textContent = n===1? 'Upload' : n===2? 'Segment' : 'Edit'; }
+  if(n===1) setHelp('Upload an image and initialize the model.');
+  if(n===2) setHelp('Add positive (left) and negative (right/Shift) points. Save components you want to edit.');
+  if(n===3) setHelp('Adjust qualitative sliders then Apply.');
+}
 
 imageInput.addEventListener('change', () => {
   const file = imageInput.files[0];
@@ -86,6 +103,8 @@ async function samInit(){
   samStatus.textContent = 'Image ready';
   setHelp('Click up to 3 positive points (left). Use right / Shift+Click for negatives.');
     enableSamButtons();
+    // Move to phase 2 automatically
+    showPhase(2);
   } catch(e){ console.error(e); samStatus.textContent='Init error'; }
 }
 
@@ -269,6 +288,8 @@ function renderSamSavedComponents(){
     samSavedList.appendChild(chip);
   });
   if(!samActiveSaved && samSavedComponents.length){ selectSamSaved(samSavedComponents[0].id); }
+  // Enable continue if at least one component
+  if(toEditPhase) toEditPhase.disabled = samSavedComponents.length===0;
 }
 
 function selectSamSaved(id){
@@ -280,14 +301,16 @@ function selectSamSaved(id){
 function buildSamEdits(){
   samEditsList.innerHTML='';
   if(!samActiveSaved) { samApplyBtn.disabled=true; return; }
+  // Qualitative slider mapping (human names -> backend keys)
   const fields = [
-    {key:'brightness', label:'Brightness', min:-1, max:1, step:0.02, def:0},
-    {key:'contrast', label:'Contrast', min:-1, max:1, step:0.02, def:0},
-    {key:'gamma', label:'Gamma', min:-0.9, max:2, step:0.05, def:0},
-    {key:'hue', label:'Hue', min:-180, max:180, step:1, def:0},
-    {key:'saturation', label:'Sat', min:-1, max:3, step:0.05, def:0},
-    {key:'sharpen', label:'Sharpen', min:0, max:2, step:0.1, def:0},
-    {key:'noise', label:'Noise', min:0, max:0.2, step:0.01, def:0}
+    {key:'brightness', label:'Darker ←→ Lighter', min:-1, max:1, step:0.02, def:0},
+    {key:'contrast', label:'Flatter ←→ Punchier', min:-1, max:1, step:0.02, def:0},
+    {key:'gamma', label:'Lift Shadows ←→ Deepen', min:-0.9, max:2, step:0.05, def:0},
+    {key:'hue', label:'Hue Rotate', min:-180, max:180, step:1, def:0},
+    {key:'saturation', label:'Muted ←→ Vivid', min:-1, max:3, step:0.05, def:0},
+    {key:'sharpen', label:'Softer ←→ Sharper', min:0, max:2, step:0.1, def:0},
+    {key:'noise', label:'Clean ←→ Texture', min:0, max:0.2, step:0.01, def:0},
+    {key:'opacity', label:'Transparent ←→ Solid', min:0, max:1, step:0.02, def:1}
   ];
   const state = samEditsMap[samActiveSaved] || {}; samEditsMap[samActiveSaved]=state;
   fields.forEach(f=>{
@@ -323,4 +346,29 @@ samApplyBtn.addEventListener('click', async ()=>{
     const data = await resp.json();
     if(!resp.ok){ samApplyStatus.textContent = data.error || 'Apply failed'; return; }
     samApplyStatus.textContent='Done';
-    if(data.variant_png){ samEditedImg.src='data:image/png;base64,'+data.variant_png; samDownloadBtn.disabled=
+    if(data.variant_png){ samEditedImg.src='data:image/png;base64,'+data.variant_png; samDownloadBtn.disabled=false; }
+    if(data.component_mask_png){ samDownloadBtn.dataset.maskPng = data.component_mask_png; }
+    setHelp('Preview updated. Download if satisfied or refine sliders.');
+  } catch(e){ console.error(e); samApplyStatus.textContent='Error'; }
+});
+
+samDownloadBtn.addEventListener('click', ()=>{
+  if(!samEditedImg.src) return;
+  const a = document.createElement('a'); a.href=samEditedImg.src; a.download='variant.png'; a.click();
+  if(samDownloadBtn.dataset.maskPng){
+    const a2 = document.createElement('a'); a2.href='data:image/png;base64,'+samDownloadBtn.dataset.maskPng; a2.download='component_mask.png'; a2.click();
+  }
+});
+
+function fetchAndUpdateSaved(){ loadSamComponents(); }
+// Optional periodic refresh removed (unnecessary in simplified workflow)
+
+// Removed classic segmentation & preset code.
+
+// Phase navigation
+if(backToUpload){ backToUpload.addEventListener('click', ()=> showPhase(1)); }
+if(toEditPhase){ toEditPhase.addEventListener('click', ()=> { if(!toEditPhase.disabled) showPhase(3); }); }
+if(backToSegment){ backToSegment.addEventListener('click', ()=> showPhase(2)); }
+
+// Initialize phase 1
+showPhase(1);
