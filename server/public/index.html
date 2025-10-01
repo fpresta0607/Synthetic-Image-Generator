@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>SAM Interactive Segmentation & Edits</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>SAM Interactive Segmentation</h1>
+    <p class="tagline">Upload → Add Points → Pick Mask → Save Component → Adjust → Apply</p>
+  </header>
+  <main>
+    <section class="panel" id="samPanel" aria-labelledby="samHeading">
+      <h2 id="samHeading">Steps</h2>
+      <ol class="steps">
+        <li><strong>Upload</strong> an image.</li>
+        <li><strong>Init SAM</strong>.</li>
+        <li><strong>Click</strong> positive (left) and negative (right / Shift+Click) points.</li>
+        <li><strong>Select</strong> a candidate mask.</li>
+        <li><strong>Name & Save</strong> it.</li>
+        <li><strong>Adjust</strong> component sliders.</li>
+        <li><strong>Apply & Download</strong>.</li>
+      </ol>
+      <div class="controls-row">
+        <label class="file-label">Image
+          <input type="file" id="imageInput" accept="image/*" />
+        </label>
+        <button id="samInitBtn" disabled>Init SAM</button>
+        <button id="samUndoBtn" disabled title="Undo last point (U)">Undo</button>
+        <button id="samClearBtn" disabled title="Clear all points (Esc)">Clear</button>
+        <button id="samRefreshBtn" disabled title="Re-run segmentation">Re-Segment</button>
+        <span id="samStatus" class="status" aria-live="polite"></span>
+        <span id="samPointSummary" class="point-summary" aria-live="polite"></span>
+      </div>
+      <div class="layout-grid">
+        <div class="block">
+          <h3 class="block-title">Image & Points</h3>
+          <div class="preview-container" id="samPreviewContainer" aria-label="Image with points overlay">
+            <img id="samImg" alt="Uploaded image" />
+            <canvas id="samOverlay" aria-hidden="true"></canvas>
+            <canvas id="samPointsCanvas" aria-hidden="true"></canvas>
+            <div class="point-legend">Left: + | Right / Shift+Click: −</div>
+          </div>
+        </div>
+        <div class="block">
+          <h3 class="block-title">Mask Candidates</h3>
+          <ul id="samCandidates" class="candidate-list" aria-label="Mask Candidates">
+            <li class="empty">Add points to see masks.</li>
+          </ul>
+          <div class="sam-save">
+            <input type="text" id="samComponentName" placeholder="Component name" aria-label="Component name" />
+            <button id="samSaveBtn" disabled>Save</button>
+          </div>
+          <div class="hint compact">Save multiple masks; each gets its own sliders.</div>
+        </div>
+        <div class="block">
+          <h3 class="block-title">Result</h3>
+          <img id="samEditedImg" alt="Edited output" class="result-img" />
+          <div class="sam-apply">
+            <button id="samApplyBtn" disabled>Apply Edits</button>
+            <button id="samDownloadBtn" disabled>Download</button>
+            <span id="samApplyStatus" class="status" aria-live="polite"></span>
+          </div>
+        </div>
+      </div>
+      <div class="sam-components-panel" id="samComponentsPanel" hidden>
+        <h3>Saved Components</h3>
+        <div id="samSavedList" class="saved-components" aria-live="polite">None yet.</div>
+        <h3>Edit Sliders</h3>
+        <div id="samEditsList" class="edits-grid" aria-live="polite"></div>
+        <div class="edit-hint">Neutral: Bright 0 · Contrast 0 · Gamma 0 · Hue 0° · Sat 0 · Sharpen 0 · Noise 0. Small |value| < 0.15 is subtle.</div>
+      </div>
+    </section>
+  </main>
+  <footer>
+    <span>Keyboard: 1/2/3 pick candidate · U undo · Esc clear.</span

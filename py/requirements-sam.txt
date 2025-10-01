@@ -1,0 +1,25 @@
+# Base requirements
+flask==3.0.3
+numpy==1.26.4
+scikit-image==0.23.2
+Pillow==10.4.0
+
+###############################################################
+# SAM + Torch requirements
+# If you have a GPU and want CUDA acceleration, prefer the command from:
+#   https://pytorch.org/get-started/locally/
+# For now we install CPU wheels (sufficient for small interactive use).
+torch==2.3.1
+torchvision==0.18.1
+torchaudio==2.3.1
+
+# OpenCV needed by segment-anything utilities
+opencv-python==4.10.0.84
+
+# segment-anything (GitHub source install)
+git+https://github.com/facebookresearch/segment-anything.git
+
+# Optional (uncomment if you later need visualization notebooks):
+# matplotlib==3.9.2
+# jupyter
+###############################################################
