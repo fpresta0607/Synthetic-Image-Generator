@@ -1,0 +1,637 @@
+// ========== Dataset Workflow State ==========
+let datasetState = {
+  datasetId: null,
+  images: [], // {filename, file}
+  templates: [], // {template_id, name, image_filename, points:[{x_norm,y_norm,positive}], edits:{}}
+  currentReferenceFile: null,
+  currentReferenceFilename: null,
+  currentPoints: [], // [{x,y,positive}] in pixel coords
+  results: [] // generated variants
+};
+
+// ========== DOM Elements ==========
+const helpContent = document.getElementById('helpContent');
+const phaseLabel = document.getElementById('phaseLabel');
+
+// Step 1: Dataset
+const stepDataset = document.getElementById('stepDataset');
+const datasetImages = document.getElementById('datasetImages');
+const datasetInitBtn = document.getElementById('datasetInitBtn');
+const datasetStatus = document.getElementById('datasetStatus');
+const datasetPreview = document.getElementById('datasetPreview');
+
+// Step 2: Templates
+const stepTemplate = document.getElementById('stepTemplate');
+const templateAddBtn = document.getElementById('templateAddBtn');
+const templateStatus = document.getElementById('templateStatus');
+const referenceGallery = document.getElementById('referenceGallery');
+const pointCaptureBlock = document.getElementById('pointCaptureBlock');
+const templatePreviewContainer = document.getElementById('templatePreviewContainer');
+const templateImg = document.getElementById('templateImg');
+const templatePointsCanvas = document.getElementById('templatePointsCanvas');
+const templateName = document.getElementById('templateName');
+const templateSaveBtn = document.getElementById('templateSaveBtn');
+const templateClearBtn = document.getElementById('templateClearBtn');
+const pointCount = document.getElementById('pointCount');
+const templateList = document.getElementById('templateList');
+const proceedToEditsBtn = document.getElementById('proceedToEditsBtn');
+
+// Step 3: Generate
+const stepGenerate = document.getElementById('stepGenerate');
+const templateEditsList = document.getElementById('templateEditsList');
+const generateBtn = document.getElementById('generateBtn');
+const generateStatus = document.getElementById('generateStatus');
+const generateResults = document.getElementById('generateResults');
+const downloadAllBtn = document.getElementById('downloadAllBtn');
+const backToTemplates = document.getElementById('backToTemplates');
+
+// ========== Workflow Navigation ==========
+function showStep(step) {
+  [stepDataset, stepTemplate, stepGenerate].forEach(s => {
+    s.hidden = s !== step;
+    s.classList.toggle('active', s === step);
+  });
+  if (step === stepDataset) {
+    phaseLabel.textContent = 'Upload Dataset';
+    helpContent.textContent = 'Upload multiple images to initialize a dataset.';
+  } else if (step === stepTemplate) {
+    phaseLabel.textContent = 'Capture Templates';
+    helpContent.textContent = 'Select reference images and add point prompts to create templates.';
+  } else if (step === stepGenerate) {
+    phaseLabel.textContent = 'Generate';
+    helpContent.textContent = 'Configure edits per template and generate all variants.';
+  }
+}
+
+// ========== OLD CODE REMOVED - REPLACED WITH DATASET WORKFLOW ==========
+const imageInput = null;
+const phase1 = document.getElementById('phase1');
+const phase2 = document.getElementById('phase2');
+const phase3 = document.getElementById('phase3');
+const phaseLabel = document.getElementById('phaseLabel');
+const backToUpload = document.getElementById('backToUpload');
+const toEditPhase = document.getElementById('toEditPhase');
+const backToSegment = document.getElementById('backToSegment');
+// Legacy reference kept if needed
+const samPanel = document.getElementById('samPanel');
+const samInitBtn = document.getElementById('samInitBtn');
+const samUndoBtn = document.getElementById('samUndoBtn');
+const samClearBtn = document.getElementById('samClearBtn');
+const samRefreshBtn = document.getElementById('samRefreshBtn');
+const samStatus = document.getElementById('samStatus');
+const samImg = document.getElementById('samImg');
+const samOverlay = document.getElementById('samOverlay');
+const samPointsCanvas = document.getElementById('samPointsCanvas');
+const samCandidates = document.getElementById('samCandidates');
+const samComponentName = document.getElementById('samComponentName');
+const samSaveBtn = document.getElementById('samSaveBtn');
+const samComponentsPanel = document.getElementById('samComponentsPanel');
+const samSavedList = document.getElementById('samSavedList');
+const samEditsList = document.getElementById('samEditsList');
+const samApplyBtn = document.getElementById('samApplyBtn');
+const samDownloadBtn = document.getElementById('samDownloadBtn');
+const samApplyStatus = document.getElementById('samApplyStatus');
+const samEditedImg = document.getElementById('samEditedImg');
+const helpContent = document.getElementById('helpContent');
+const samPointSummary = document.getElementById('samPointSummary');
+// Batch elements
+const batchPanel = document.getElementById('batchPanel');
+const jumpToBatch = document.getElementById('jumpToBatch');
+const batchImages = document.getElementById('batchImages');
+const batchMode = document.getElementById('batchMode');
+const batchExportMask = document.getElementById('batchExportMask');
+const batchBuildEdits = document.getElementById('batchBuildEdits');
+const batchRunBtn = document.getElementById('batchRunBtn');
+const batchStatus = document.getElementById('batchStatus');
+const batchEditsBlock = document.getElementById('batchEditsBlock');
+const batchEditsList = document.getElementById('batchEditsList');
+const batchResults = document.getElementById('batchResults');
+const batchDownloadAll = document.getElementById('batchDownloadAll');
+const batchResultCount = document.getElementById('batchResultCount');
+let batchStreamMode = false; // toggle if streaming chosen
+
+let currentFile = null;
+// SAM state
+let samImageId = null;
+let samPoints = []; // {x,y,positive}
+let samCandidatesData = [];
+let samActiveCandidate = null; // object from candidates
+let samSavedComponents = []; // {id,bbox,area,score,name}
+let samActiveSaved = null; // component id
+let samEditsMap = {}; // component_id -> edits object
+
+// Utility: update contextual help
+function setHelp(msg){ if(helpContent) helpContent.textContent = msg; }
+
+function showPhase(n){
+  [phase1, phase2, phase3].forEach(p=>{ if(p){ const isTarget = p.dataset.phase === String(n); p.hidden = !isTarget; p.classList.toggle('active', isTarget); }});
+  if(phaseLabel){ phaseLabel.textContent = n===1? 'Upload' : n===2? 'Segment' : 'Edit'; }
+  if(n===1) setHelp('Upload an image and initialize the model.');
+  if(n===2) setHelp('Add positive (left) and negative (right/Shift) points. Save components you want to edit.');
+  if(n===3) setHelp('Adjust qualitative sliders then Apply.');
+}
+
+imageInput.addEventListener('change', () => {
+  const file = imageInput.files[0];
+  if(!file) return;
+  currentFile = file;
+  resetSamState();
+  samInitBtn.disabled = false;
+  samStatus.textContent = 'Ready';
+  setHelp('Click Init SAM to embed the image.');
+});
+
+// Removed classic segmentation logic
+
+// ------------------------- SAM Logic ----------------------------
+function resetSamState(){
+  samImageId = null;
+  samPoints = [];
+  samCandidatesData = [];
+  samActiveCandidate = null;
+  samSavedComponents = [];
+  samActiveSaved = null;
+  samEditsMap = {};
+  samImg.src = '';
+  samOverlay.getContext('2d').clearRect(0,0,samOverlay.width,samOverlay.height);
+  samPointsCanvas.getContext('2d').clearRect(0,0,samPointsCanvas.width,samPointsCanvas.height);
+  samCandidates.innerHTML='';
+  samSavedList.innerHTML='';
+  samEditsList.innerHTML='';
+  samApplyBtn.disabled = true;
+  samDownloadBtn.disabled = true;
+  samSaveBtn.disabled = true;
+  samUndoBtn.disabled = true;
+  samClearBtn.disabled = true;
+  samRefreshBtn.disabled = true;
+  setHelp('Init SAM to begin placing points.');
+}
+
+async function samInit(){
+  if(!currentFile) return;
+  samStatus.textContent = 'Initializing...'; setHelp('Loading model & embedding image...');
+  const form = new FormData();
+  form.append('image', currentFile);
+  try {
+    const resp = await fetch('/api/sam/init', { method:'POST', body: form });
+    const data = await resp.json();
+    if(!resp.ok){ samStatus.textContent = data.error || 'Init failed'; return; }
+    samImageId = data.image_id;
+    samImg.src = URL.createObjectURL(currentFile);
+    // Setup canvases size after image loads
+    samImg.onload = ()=>{ resizeSamCanvases(); drawSamPoints(); };
+  samStatus.textContent = 'Image ready';
+  setHelp('Click up to 3 positive points (left). Use right / Shift+Click for negatives.');
+    enableSamButtons();
+    // Move to phase 2 automatically
+    showPhase(2);
+  } catch(e){ console.error(e); samStatus.textContent='Init error'; }
+}
+
+function enableSamButtons(){
+  samUndoBtn.disabled = samPoints.length===0;
+  samClearBtn.disabled = samPoints.length===0;
+  samRefreshBtn.disabled = samPoints.length===0;
+  samInitBtn.disabled = !!samImageId;
+}
+
+function resizeSamCanvases(){
+  [samOverlay, samPointsCanvas].forEach(c=>{ c.width = samImg.clientWidth; c.height = samImg.clientHeight; });
+}
+window.addEventListener('resize', ()=>{ if(!samPanel.hidden) { resizeSamCanvases(); drawSamPoints(); drawSamCandidate(); }});
+
+function addSamPoint(x,y,positive){
+  samPoints.push({x,y,positive});
+  if(samPoints.length>3) samPoints.shift(); // keep last 3 for responsiveness
+  drawSamPoints();
+  enableSamButtons();
+  samSegment();
+  setHelp('Select the best mask from the list.');
+}
+
+function undoSamPoint(){
+  samPoints.pop();
+  drawSamPoints();
+  enableSamButtons();
+  if(samPoints.length) samSegment(); else { samCandidates.innerHTML=''; clearSamOverlays(); }
+  setHelp(samPoints.length? 'Updated points – masks refreshing.' : 'No points left. Add points to get masks.');
+}
+
+function clearSamPoints(){
+  samPoints=[]; samCandidates.innerHTML='<li class="empty">Add points to see masks.</li>'; samActiveCandidate=null; drawSamPoints(); clearSamOverlays(); enableSamButtons(); samSaveBtn.disabled=true; setHelp('Points cleared. Add new points.'); }
+
+function clearSamOverlays(){
+  samOverlay.getContext('2d').clearRect(0,0,samOverlay.width,samOverlay.height);
+}
+
+function drawSamPoints(){
+  const ctx = samPointsCanvas.getContext('2d');
+  ctx.clearRect(0,0,samPointsCanvas.width,samPointsCanvas.height);
+  if(!samImg.naturalWidth) return;
+  const scaleX = samImg.clientWidth / samImg.naturalWidth;
+  const scaleY = samImg.clientHeight / samImg.naturalHeight;
+  for(const p of samPoints){
+    ctx.beginPath();
+    ctx.fillStyle = p.positive? '#10b981':'#ef4444';
+    ctx.arc(p.x*scaleX, p.y*scaleY, 5, 0, Math.PI*2);
+    ctx.fill();
+    ctx.strokeStyle='#000'; ctx.lineWidth=2; ctx.stroke();
+  }
+}
+
+async function samSegment(){
+  if(!samImageId || !samPoints.length) return;
+  samStatus.textContent='Segmenting...'; setHelp('Generating up to 3 mask proposals.');
+  try {
+    const payload = { image_id: samImageId, points: samPoints, accumulate: false, top_k:3 };
+    const resp = await fetch('/api/sam/segment', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    const data = await resp.json();
+    if(!resp.ok){ samStatus.textContent=data.error||'Segmentation failed'; return; }
+    samCandidatesData = data.candidates || [];
+    if(data.point_summary && samPointSummary){
+      const ps = data.point_summary;
+      samPointSummary.textContent = `${ps.positive}+ / ${ps.negative}-`; }
+    renderSamCandidates();
+    samStatus.textContent = 'Candidates ready'; setHelp('Click a candidate to preview.');
+  } catch(e){ console.error(e); samStatus.textContent='Segment error'; }
+}
+
+function renderSamCandidates(){
+  samCandidates.innerHTML='';
+  samCandidatesData.forEach(c=>{
+    const li = document.createElement('li');
+    li.dataset.rank=c.rank;
+    // Show area; if a prior candidate existed with same rank earlier, compute delta for quick visual reference
+    let delta = '';
+    if(window._lastAreas && window._lastAreas[c.rank]){
+      const prev = window._lastAreas[c.rank];
+      const diff = c.area - prev;
+      if(diff !== 0){
+        const sign = diff>0? '+' : '';
+        delta = `<span class="delta" style="color:${diff>0?'#10b981':'#ef4444'}">${sign}${diff}</span>`;
+      }
+    }
+    li.innerHTML = `<span>#${c.rank}</span><span class="score">${c.score.toFixed(3)}</span><span>${c.area}</span>${delta}`;
+    li.addEventListener('click', ()=> selectSamCandidate(c.rank));
+    samCandidates.appendChild(li);
+  });
+  // Store current areas for next comparison
+  window._lastAreas = Object.fromEntries(samCandidatesData.map(c=>[c.rank, c.area]));
+  if(samCandidatesData.length){ selectSamCandidate(1); }
+}
+
+function selectSamCandidate(rank){
+  samActiveCandidate = samCandidatesData.find(c=>c.rank===rank);
+  [...samCandidates.children].forEach(li=> li.classList.toggle('active', parseInt(li.dataset.rank,10)===rank));
+  drawSamCandidate();
+  samSaveBtn.disabled = !samActiveCandidate;
+  if(samActiveCandidate) setHelp('Optionally name the component then Save.');
+}
+
+function drawSamCandidate(){
+  clearSamOverlays();
+  if(!samActiveCandidate) return;
+  const ctx = samOverlay.getContext('2d');
+  const img = new Image();
+  img.onload = ()=>{
+    samOverlay.width = samImg.clientWidth; samOverlay.height = samImg.clientHeight;
+    const scaleX = samImg.clientWidth / img.width; const scaleY = samImg.clientHeight / img.height;
+    ctx.globalAlpha = 0.35; ctx.drawImage(img,0,0,img.width,img.height,0,0,img.width*scaleX,img.height*scaleY); ctx.globalAlpha=1;
+    ctx.strokeStyle='#3b82f6'; ctx.lineWidth=2; ctx.setLineDash([6,4]);
+    // Derive bbox from candidate
+    const b = samActiveCandidate.bbox;
+    ctx.strokeRect(b[0]*scaleX, b[1]*scaleY, (b[2]-b[0])*scaleX, (b[3]-b[1])*scaleY);
+  };
+  img.src = 'data:image/png;base64,'+samActiveCandidate.mask_png;
+}
+
+samInitBtn.addEventListener('click', samInit);
+samUndoBtn.addEventListener('click', undoSamPoint);
+samClearBtn.addEventListener('click', clearSamPoints);
+samRefreshBtn.addEventListener('click', samSegment);
+
+samImg.addEventListener('contextmenu', e=> e.preventDefault());
+samImg.addEventListener('click', e => handleSamClick(e, true));
+samImg.addEventListener('mousedown', e => { if(e.button===2) handleSamClick(e,false); });
+samImg.addEventListener('mousemove', ()=>{});
+window.addEventListener('keydown', e=>{
+  if(samPanel.hidden) return;
+  if(e.key==='u' || (e.ctrlKey && e.key==='z')) { undoSamPoint(); }
+  if(e.key==='Escape'){ clearSamPoints(); }
+  if(e.key==='1') selectSamCandidate(1);
+  if(e.key==='2') selectSamCandidate(2);
+  if(e.key==='3') selectSamCandidate(3);
+});
+
+function handleSamClick(e, positive){
+  if(!samImageId) return;
+  const rect = samImg.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (samImg.naturalWidth / rect.width);
+  const y = (e.clientY - rect.top) * (samImg.naturalHeight / rect.height);
+  addSamPoint(Math.round(x), Math.round(y), positive && !e.shiftKey);
+}
+
+samSaveBtn.addEventListener('click', async ()=>{
+  if(!samActiveCandidate || !samImageId) return;
+  const name = samComponentName.value.trim() || undefined;
+  const payload = { image_id: samImageId, mask_png: samActiveCandidate.mask_png, score: samActiveCandidate.score, name };
+  try {
+    const resp = await fetch('/api/sam/save_component', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    const data = await resp.json();
+    if(!resp.ok){ samStatus.textContent = data.error || 'Save failed'; return; }
+  samStatus.textContent = 'Component saved'; setHelp('Component stored. Adjust sliders below or add more components.');
+    samComponentName.value='';
+    loadSamComponents();
+  } catch(e){ console.error(e); samStatus.textContent='Save error'; }
+});
+
+async function loadSamComponents(){
+  if(!samImageId) return;
+  try {
+    const resp = await fetch(`/api/sam/components?image_id=${samImageId}`);
+    const data = await resp.json();
+    if(!resp.ok){ samComponentsPanel.hidden=true; return; }
+    samSavedComponents = data.components || [];
+    renderSamSavedComponents();
+    samComponentsPanel.hidden = samSavedComponents.length===0;
+  } catch(e){ console.error(e); }
+}
+
+function renderSamSavedComponents(){
+  samSavedList.innerHTML='';
+  samSavedComponents.forEach(c=>{
+    const chip = document.createElement('div');
+    chip.className='chip';
+    chip.textContent = `${c.name||'comp_'+c.id} (${c.id})`;
+    chip.addEventListener('click', ()=> selectSamSaved(c.id));
+    if(c.id===samActiveSaved) chip.classList.add('active');
+    samSavedList.appendChild(chip);
+  });
+  if(!samActiveSaved && samSavedComponents.length){ selectSamSaved(samSavedComponents[0].id); }
+  // Enable continue if at least one component
+  if(toEditPhase) toEditPhase.disabled = samSavedComponents.length===0;
+}
+
+function selectSamSaved(id){
+  samActiveSaved = id;
+  renderSamSavedComponents();
+  buildSamEdits();
+}
+
+function buildSamEdits(){
+  samEditsList.innerHTML='';
+  if(!samActiveSaved) { samApplyBtn.disabled=true; return; }
+  // Qualitative slider mapping (human names -> backend keys)
+  const fields = [
+    {key:'brightness', label:'Darker ←→ Lighter', min:-1, max:1, step:0.02, def:0},
+    {key:'contrast', label:'Flatter ←→ Punchier', min:-1, max:1, step:0.02, def:0},
+    {key:'gamma', label:'Lift Shadows ←→ Deepen', min:-0.9, max:2, step:0.05, def:0},
+    {key:'hue', label:'Hue Rotate', min:-180, max:180, step:1, def:0},
+    {key:'saturation', label:'Muted ←→ Vivid', min:-1, max:3, step:0.05, def:0},
+    {key:'sharpen', label:'Softer ←→ Sharper', min:0, max:2, step:0.1, def:0},
+    {key:'noise', label:'Clean ←→ Texture', min:0, max:0.2, step:0.01, def:0},
+    {key:'opacity', label:'Transparent ←→ Solid', min:0, max:1, step:0.02, def:1}
+  ];
+  const state = samEditsMap[samActiveSaved] || {}; samEditsMap[samActiveSaved]=state;
+  fields.forEach(f=>{
+    const val = (f.key in state)? state[f.key]: f.def;
+    const wrap = document.createElement('label');
+    wrap.innerHTML = `${f.label}<input type="range" data-field="${f.key}" value="${val}" min="${f.min}" max="${f.max}" step="${f.step}" /><input type="number" data-sync-field="${f.key}" value="${val}" min="${f.min}" max="${f.max}" step="${f.step}" />`;
+    samEditsList.appendChild(wrap);
+  });
+  samApplyBtn.disabled=false;
+  setHelp('Tweak sliders, then Apply to see result.');
+}
+
+samEditsList.addEventListener('input', e=>{
+  const t = e.target;
+  if(t.matches('input[data-field]')){
+    const field = t.dataset.field; const num = samEditsList.querySelector(`input[data-sync-field="${field}"]`); if(num) num.value = t.value;
+    if(!samEditsMap[samActiveSaved]) samEditsMap[samActiveSaved]={};
+    samEditsMap[samActiveSaved][field] = parseFloat(t.value);
+  } else if(t.matches('input[data-sync-field]')){
+    const field = t.dataset.syncField; const range = samEditsList.querySelector(`input[data-field="${field}"]`); if(range) range.value = t.value;
+    if(!samEditsMap[samActiveSaved]) samEditsMap[samActiveSaved]={};
+    samEditsMap[samActiveSaved][field] = parseFloat(t.value);
+  }
+});
+
+samApplyBtn.addEventListener('click', async ()=>{
+  if(!samImageId || !samSavedComponents.length) return;
+  samApplyStatus.textContent='Applying...';
+  try {
+  const edits = Object.entries(samEditsMap).map(([cid,vals])=>({ component_id: parseInt(cid,10), ...vals }));
+    const payload = { image_id: samImageId, edits, export_mask: (edits.length===1) };
+    const resp = await fetch('/api/sam/apply', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    const data = await resp.json();
+    if(!resp.ok){ samApplyStatus.textContent = data.error || 'Apply failed'; return; }
+    samApplyStatus.textContent='Done';
+    if(data.variant_png){ samEditedImg.src='data:image/png;base64,'+data.variant_png; samDownloadBtn.disabled=false; }
+    if(data.component_mask_png){ samDownloadBtn.dataset.maskPng = data.component_mask_png; }
+    setHelp('Preview updated. Download if satisfied or refine sliders.');
+  } catch(e){ console.error(e); samApplyStatus.textContent='Error'; }
+});
+
+samDownloadBtn.addEventListener('click', ()=>{
+  if(!samEditedImg.src) return;
+  const a = document.createElement('a'); a.href=samEditedImg.src; a.download='variant.png'; a.click();
+  if(samDownloadBtn.dataset.maskPng){
+    const a2 = document.createElement('a'); a2.href='data:image/png;base64,'+samDownloadBtn.dataset.maskPng; a2.download='component_mask.png'; a2.click();
+  }
+});
+
+function fetchAndUpdateSaved(){ loadSamComponents(); }
+// Optional periodic refresh removed (unnecessary in simplified workflow)
+
+// Removed classic segmentation & preset code.
+
+// Phase navigation
+if(backToUpload){ backToUpload.addEventListener('click', ()=> showPhase(1)); }
+if(toEditPhase){ toEditPhase.addEventListener('click', ()=> { if(!toEditPhase.disabled) showPhase(3); }); }
+if(backToSegment){ backToSegment.addEventListener('click', ()=> showPhase(2)); }
+
+// Initialize phase 1
+showPhase(1);
+
+// ------------------------- Batch Processing Logic ----------------------------
+let batchEditState = {};
+
+function buildBatchEdits(){
+  if(!batchEditsList) return;
+  batchEditsList.innerHTML='';
+  const fields = [
+    {key:'brightness', label:'Darker ←→ Lighter', min:-1, max:1, step:0.02, def:0},
+    {key:'contrast', label:'Flatter ←→ Punchier', min:-1, max:1, step:0.02, def:0},
+    {key:'gamma', label:'Lift Shadows ←→ Deepen', min:-0.9, max:2, step:0.05, def:0},
+    {key:'hue', label:'Hue Rotate', min:-180, max:180, step:1, def:0},
+    {key:'saturation', label:'Muted ←→ Vivid', min:-1, max:3, step:0.05, def:0},
+    {key:'sharpen', label:'Softer ←→ Sharper', min:0, max:2, step:0.1, def:0},
+    {key:'noise', label:'Clean ←→ Texture', min:0, max:0.2, step:0.01, def:0},
+    {key:'opacity', label:'Transparent ←→ Solid', min:0, max:1, step:0.02, def:1}
+  ];
+  fields.forEach(f=>{
+    const val = (f.key in batchEditState)? batchEditState[f.key]: f.def;
+    const wrap = document.createElement('label');
+    wrap.innerHTML = `${f.label}<input type="range" data-batch-field="${f.key}" value="${val}" min="${f.min}" max="${f.max}" step="${f.step}" /><input type="number" data-batch-sync="${f.key}" value="${val}" min="${f.min}" max="${f.max}" step="${f.step}" />`;
+    batchEditsList.appendChild(wrap);
+  });
+}
+
+batchEditsList?.addEventListener('input', e=>{
+  const t = e.target;
+  if(t.matches('input[data-batch-field]')){
+    const k = t.dataset.batchField; const num = batchEditsList.querySelector(`input[data-batch-sync="${k}"]`); if(num) num.value = t.value;
+    batchEditState[k] = parseFloat(t.value);
+  } else if(t.matches('input[data-batch-sync]')){
+    const k = t.dataset.batchSync; const range = batchEditsList.querySelector(`input[data-batch-field="${k}"]`); if(range) range.value = t.value;
+    batchEditState[k] = parseFloat(t.value);
+  }
+});
+
+batchBuildEdits?.addEventListener('click', ()=>{
+  batchEditsBlock.hidden = !batchEditsBlock.hidden;
+  if(!batchEditsBlock.hidden){ buildBatchEdits(); }
+});
+
+batchImages?.addEventListener('change', ()=>{
+  batchRunBtn.disabled = !batchImages.files.length;
+  batchStatus.textContent='';
+});
+
+batchRunBtn?.addEventListener('click', async ()=>{
+  if(!batchImages.files.length) return;
+  batchRunBtn.disabled=true; batchStatus.textContent='Processing...'; batchResults.innerHTML='';
+  const form = new FormData();
+  [...batchImages.files].forEach(f=> form.append('images', f));
+  form.append('mode', batchMode.value);
+  if(batchExportMask.checked) form.append('export_mask','1');
+  // Only include edits if any field deviates from defaults
+  const anyEdit = Object.entries(batchEditState).some(([k,v])=>{
+    const defMap = {brightness:0,contrast:0,gamma:0,hue:0,saturation:0,sharpen:0,noise:0,opacity:1};
+    return v !== defMap[k];
+  });
+  if(anyEdit){ form.append('edits', JSON.stringify(batchEditState)); }
+  try {
+    if(batchStreamMode){
+      await runBatchStream(form);
+    } else {
+      const resp = await fetch('/api/sam/batch_process', { method:'POST', body: form });
+      const data = await resp.json();
+      if(!resp.ok){ batchStatus.textContent = data.error || 'Batch failed'; batchRunBtn.disabled=false; return; }
+      renderBatchResults(data.results||[]);
+      batchStatus.textContent = 'Done';
+    }
+  } catch(e){ console.error(e); batchStatus.textContent='Error'; }
+  finally { batchRunBtn.disabled=false; }
+});
+
+async function runBatchStream(form){
+  batchStatus.textContent='Streaming...';
+  const resp = await fetch('/api/sam/batch_process_stream', { method:'POST', body: form });
+  if(!resp.ok){
+    try { const err = await resp.json(); batchStatus.textContent = err.error || 'Stream failed'; } catch(_) { batchStatus.textContent='Stream failed'; }
+    return;
+  }
+  // Read stream incrementally
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const results = [];
+  while(true){
+    const {done, value} = await reader.read();
+    if(done) break;
+    buffer += decoder.decode(value, {stream:true});
+    // Split on double newline which SSE uses to delimit events
+    const parts = buffer.split(/\n\n/);
+    buffer = parts.pop() || '';
+    for(const chunk of parts){
+      const line = chunk.trim();
+      if(!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if(payload === '[DONE]'){
+        renderBatchResults(results);
+        batchStatus.textContent = 'Done';
+        return;
+      }
+      try {
+        const obj = JSON.parse(payload);
+        results.push(obj);
+        incrementalAddBatchResult(obj, results.length);
+      } catch(e){ /* ignore parse errors for partial lines */ }
+    }
+  }
+  // Fallback finalize if no [DONE]
+  renderBatchResults(results);
+  batchStatus.textContent = 'Done';
+}
+
+function incrementalAddBatchResult(r, idx){
+  // Ensure count updates
+  const current = batchResults.querySelectorAll('.result-card').length;
+  batchResultCount.textContent = `(${current+1})`;
+  const card = document.createElement('div'); card.className='result-card';
+  if(r.variant_png){
+    const img = document.createElement('img'); img.alt = r.filename; img.src = 'data:image/png;base64,'+r.variant_png; card.appendChild(img);
+  } else {
+    const placeholder = document.createElement('div'); placeholder.style.height='110px'; placeholder.style.display='flex'; placeholder.style.alignItems='center'; placeholder.style.justifyContent='center'; placeholder.style.fontSize='.55rem'; placeholder.textContent='Processing'; card.appendChild(placeholder);
+  }
+  if(r.component_mask_png){ const flag = document.createElement('div'); flag.className='mask-flag'; flag.textContent='MASK'; card.appendChild(flag); }
+  const meta = document.createElement('div'); meta.className='result-meta';
+  const fn = document.createElement('span'); fn.textContent = r.filename; meta.appendChild(fn);
+  const modeSpan = document.createElement('span'); modeSpan.textContent = r.mode || ''; meta.appendChild(modeSpan);
+  card.appendChild(meta);
+  if(r.variant_png){
+    const dlBtn = document.createElement('button'); dlBtn.textContent='Download'; dlBtn.style.fontSize='.55rem'; dlBtn.addEventListener('click', ()=> downloadSingleBatch(r)); card.appendChild(dlBtn);
+  }
+  batchResults.appendChild(card);
+  batchDownloadAll.disabled=false;
+  batchDownloadAll.onclick = ()=> downloadAllBatch([...batchResults.querySelectorAll('.result-card')].map((el,i)=> resultsToObjects()[i]).filter(Boolean));
+}
+
+function resultsToObjects(){
+  // Not storing mapping on DOM; rely on closure updates during streaming
+  return Array.from(batchResults.querySelectorAll('.result-card')).map(card=>{
+    const img = card.querySelector('img');
+    const meta = card.querySelector('.result-meta');
+    const spans = meta? meta.querySelectorAll('span'):[];
+    return img? { filename: spans[0]?.textContent||'image', mode: spans[1]?.textContent||'', variant_png: (img.src.split(',')[1]||'') }: null;
+  });
+}
+
+function renderBatchResults(results){
+  batchResults.innerHTML='';
+  batchResultCount.textContent = results.length? `(${results.length})` : '';
+  if(!results.length){ batchDownloadAll.disabled=true; return; }
+  results.forEach(r=>{
+    const card = document.createElement('div'); card.className='result-card';
+    const img = document.createElement('img'); img.alt = r.filename; img.src = 'data:image/png;base64,'+r.variant_png; card.appendChild(img);
+    if(r.component_mask_png){
+      const flag = document.createElement('div'); flag.className='mask-flag'; flag.textContent='MASK'; card.appendChild(flag);
+    }
+    const meta = document.createElement('div'); meta.className='result-meta';
+    const fn = document.createElement('span'); fn.textContent = r.filename; meta.appendChild(fn);
+    const modeSpan = document.createElement('span'); modeSpan.textContent = r.mode; meta.appendChild(modeSpan);
+    card.appendChild(meta);
+    const dlBtn = document.createElement('button'); dlBtn.textContent='Download'; dlBtn.style.fontSize='.55rem'; dlBtn.addEventListener('click', ()=> downloadSingleBatch(r)); card.appendChild(dlBtn);
+    batchResults.appendChild(card);
+  });
+  batchDownloadAll.disabled=false;
+  batchDownloadAll.onclick = ()=> downloadAllBatch(results);
+}
+
+function downloadSingleBatch(r){
+  const a = document.createElement('a'); a.href='data:image/png;base64,'+r.variant_png; a.download=`${r.filename}_variant.png`; a.click();
+  if(r.component_mask_png){
+    const a2 = document.createElement('a'); a2.href='data:image/png;base64,'+r.component_mask_png; a2.download=`${r.filename}_mask.png`; a2.click();
+  }
+}
+
+function downloadAllBatch(results){
+  // Simple sequential trigger; for large sets a zip backend would be better
+  results.forEach(r=> downloadSingleBatch(r));
+}
+
+jumpToBatch?.addEventListener('click', ()=>{
+  batchPanel?.scrollIntoView({behavior:'smooth'});
+  setTimeout(()=>{ batchPanel.classList.add('active'); }, 100);
+});

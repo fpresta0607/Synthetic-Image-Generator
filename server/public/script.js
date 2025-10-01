@@ -1,374 +1,854 @@
-// Phase elements
-const imageInput = document.getElementById('imageInput');
-const phase1 = document.getElementById('phase1');
-const phase2 = document.getElementById('phase2');
-const phase3 = document.getElementById('phase3');
-const phaseLabel = document.getElementById('phaseLabel');
-const backToUpload = document.getElementById('backToUpload');
-const toEditPhase = document.getElementById('toEditPhase');
-const backToSegment = document.getElementById('backToSegment');
-// Legacy reference kept if needed
-const samPanel = document.getElementById('samPanel');
-const samInitBtn = document.getElementById('samInitBtn');
-const samUndoBtn = document.getElementById('samUndoBtn');
-const samClearBtn = document.getElementById('samClearBtn');
-const samRefreshBtn = document.getElementById('samRefreshBtn');
-const samStatus = document.getElementById('samStatus');
-const samImg = document.getElementById('samImg');
-const samOverlay = document.getElementById('samOverlay');
-const samPointsCanvas = document.getElementById('samPointsCanvas');
-const samCandidates = document.getElementById('samCandidates');
-const samComponentName = document.getElementById('samComponentName');
-const samSaveBtn = document.getElementById('samSaveBtn');
-const samComponentsPanel = document.getElementById('samComponentsPanel');
-const samSavedList = document.getElementById('samSavedList');
-const samEditsList = document.getElementById('samEditsList');
-const samApplyBtn = document.getElementById('samApplyBtn');
-const samDownloadBtn = document.getElementById('samDownloadBtn');
-const samApplyStatus = document.getElementById('samApplyStatus');
-const samEditedImg = document.getElementById('samEditedImg');
-const helpContent = document.getElementById('helpContent');
-const samPointSummary = document.getElementById('samPointSummary');
+﻿// Dataset Workflow State
+let datasetState = {
+  datasetId: null,
+  images: [],
+  templates: [],
+  currentReferenceFile: null,
+  currentReferenceFilename: null,
+  currentPoints: [],
+  results: []
+};
 
-let currentFile = null;
-// SAM state
-let samImageId = null;
-let samPoints = []; // {x,y,positive}
-let samCandidatesData = [];
-let samActiveCandidate = null; // object from candidates
-let samSavedComponents = []; // {id,bbox,area,score,name}
-let samActiveSaved = null; // component id
-let samEditsMap = {}; // component_id -> edits object
+// DOM Elements
+const helpContent = document.getElementById("helpContent");
+const phaseLabel = document.getElementById("phaseLabel");
+const stepDataset = document.getElementById("stepDataset");
+const datasetImages = document.getElementById("datasetImages");
+const datasetInitBtn = document.getElementById("datasetInitBtn");
+const datasetStatus = document.getElementById("datasetStatus");
+const datasetPreview = document.getElementById("datasetPreview");
+const stepTemplate = document.getElementById("stepTemplate");
+const templateAddBtn = document.getElementById("templateAddBtn");
+const templateStatus = document.getElementById("templateStatus");
+// Reference galleries (separate fail / pass)
+const referenceGalleryFail = document.getElementById("referenceGalleryFail");
+const referenceGalleryPass = document.getElementById("referenceGalleryPass");
+const pointCaptureBlock = document.getElementById("pointCaptureBlock");
+const templatePreviewContainer = document.getElementById("templatePreviewContainer");
+const templateImg = document.getElementById("templateImg");
+const templatePointsCanvas = document.getElementById("templatePointsCanvas");
+const templateMaskCanvas = document.getElementById("templateMaskCanvas");
+const templateName = document.getElementById("templateName");
+const templateClass = document.getElementById("templateClass");
+const templateSaveBtn = document.getElementById("templateSaveBtn");
+const templateClearBtn = document.getElementById("templateClearBtn");
+const templatePreviewBtn = document.getElementById("templatePreviewBtn");
+const pointCount = document.getElementById("pointCount");
+const templateList = document.getElementById("templateList");
+const proceedToEditsBtn = document.getElementById("proceedToEditsBtn");
+const stepGenerate = document.getElementById("stepGenerate");
+const templateEditsList = document.getElementById("templateEditsList");
+const generateBtn = document.getElementById("generateBtn");
+const generateStatus = document.getElementById("generateStatus");
+const generateResults = document.getElementById("generateResults");
+const downloadAllBtn = document.getElementById("downloadAllBtn");
+const backToTemplates = document.getElementById("backToTemplates");
+const templatePreviewSection = document.getElementById("templatePreviewSection");
+const previewClassFilter = document.getElementById("previewClassFilter");
+const previewTemplateBtn = document.getElementById("previewTemplateBtn");
+const previewStatus = document.getElementById("previewStatus");
+const previewResultImg = document.getElementById("previewResultImg");
+const previewPlaceholder = document.getElementById("previewPlaceholder");
 
-// Utility: update contextual help
-function setHelp(msg){ if(helpContent) helpContent.textContent = msg; }
+// Modal elements
+const generationModal = document.getElementById("generationModal");
+const modalProgressCount = document.getElementById("modalProgressCount");
+const modalProgressBar = document.getElementById("modalProgressBar");
+const modalProgressPercent = document.getElementById("modalProgressPercent");
+const modalStatusTitle = document.getElementById("modalStatusTitle");
+const modalStatusSubtitle = document.getElementById("modalStatusSubtitle");
+const currentImageSection = document.getElementById("currentImageSection");
+const currentImageName = document.getElementById("currentImageName");
+const modalMinimizeBtn = document.getElementById("modalMinimizeBtn");
+const modalCancelBtn = document.getElementById("modalCancelBtn");
+const minimizedProgress = document.getElementById("minimizedProgress");
+const minimizedCount = document.getElementById("minimizedCount");
+const minimizedExpandBtn = document.getElementById("minimizedExpandBtn");
 
-function showPhase(n){
-  [phase1, phase2, phase3].forEach(p=>{ if(p){ const isTarget = p.dataset.phase === String(n); p.hidden = !isTarget; p.classList.toggle('active', isTarget); }});
-  if(phaseLabel){ phaseLabel.textContent = n===1? 'Upload' : n===2? 'Segment' : 'Edit'; }
-  if(n===1) setHelp('Upload an image and initialize the model.');
-  if(n===2) setHelp('Add positive (left) and negative (right/Shift) points. Save components you want to edit.');
-  if(n===3) setHelp('Adjust qualitative sliders then Apply.');
+let isGenerationCancelled = false;
+
+function showGenerationModal() {
+  generationModal.hidden = false;
+  minimizedProgress.hidden = true;
+  isGenerationCancelled = false;
+  updateModalProgress(0, datasetState.images.length);
 }
 
-imageInput.addEventListener('change', () => {
-  const file = imageInput.files[0];
-  if(!file) return;
-  currentFile = file;
-  resetSamState();
-  samInitBtn.disabled = false;
-  samStatus.textContent = 'Ready';
-  setHelp('Click Init SAM to embed the image.');
-});
-
-// Removed classic segmentation logic
-
-// ------------------------- SAM Logic ----------------------------
-function resetSamState(){
-  samImageId = null;
-  samPoints = [];
-  samCandidatesData = [];
-  samActiveCandidate = null;
-  samSavedComponents = [];
-  samActiveSaved = null;
-  samEditsMap = {};
-  samImg.src = '';
-  samOverlay.getContext('2d').clearRect(0,0,samOverlay.width,samOverlay.height);
-  samPointsCanvas.getContext('2d').clearRect(0,0,samPointsCanvas.width,samPointsCanvas.height);
-  samCandidates.innerHTML='';
-  samSavedList.innerHTML='';
-  samEditsList.innerHTML='';
-  samApplyBtn.disabled = true;
-  samDownloadBtn.disabled = true;
-  samSaveBtn.disabled = true;
-  samUndoBtn.disabled = true;
-  samClearBtn.disabled = true;
-  samRefreshBtn.disabled = true;
-  setHelp('Init SAM to begin placing points.');
+function hideGenerationModal() {
+  generationModal.hidden = true;
+  minimizedProgress.hidden = true;
 }
 
-async function samInit(){
-  if(!currentFile) return;
-  samStatus.textContent = 'Initializing...'; setHelp('Loading model & embedding image...');
-  const form = new FormData();
-  form.append('image', currentFile);
-  try {
-    const resp = await fetch('/api/sam/init', { method:'POST', body: form });
-    const data = await resp.json();
-    if(!resp.ok){ samStatus.textContent = data.error || 'Init failed'; return; }
-    samImageId = data.image_id;
-    samImg.src = URL.createObjectURL(currentFile);
-    // Setup canvases size after image loads
-    samImg.onload = ()=>{ resizeSamCanvases(); drawSamPoints(); };
-  samStatus.textContent = 'Image ready';
-  setHelp('Click up to 3 positive points (left). Use right / Shift+Click for negatives.');
-    enableSamButtons();
-    // Move to phase 2 automatically
-    showPhase(2);
-  } catch(e){ console.error(e); samStatus.textContent='Init error'; }
+function minimizeModal() {
+  generationModal.hidden = true;
+  minimizedProgress.hidden = false;
 }
 
-function enableSamButtons(){
-  samUndoBtn.disabled = samPoints.length===0;
-  samClearBtn.disabled = samPoints.length===0;
-  samRefreshBtn.disabled = samPoints.length===0;
-  samInitBtn.disabled = !!samImageId;
+function expandModal() {
+  generationModal.hidden = false;
+  minimizedProgress.hidden = true;
 }
 
-function resizeSamCanvases(){
-  [samOverlay, samPointsCanvas].forEach(c=>{ c.width = samImg.clientWidth; c.height = samImg.clientHeight; });
-}
-window.addEventListener('resize', ()=>{ if(!samPanel.hidden) { resizeSamCanvases(); drawSamPoints(); drawSamCandidate(); }});
-
-function addSamPoint(x,y,positive){
-  samPoints.push({x,y,positive});
-  if(samPoints.length>3) samPoints.shift(); // keep last 3 for responsiveness
-  drawSamPoints();
-  enableSamButtons();
-  samSegment();
-  setHelp('Select the best mask from the list.');
-}
-
-function undoSamPoint(){
-  samPoints.pop();
-  drawSamPoints();
-  enableSamButtons();
-  if(samPoints.length) samSegment(); else { samCandidates.innerHTML=''; clearSamOverlays(); }
-  setHelp(samPoints.length? 'Updated points – masks refreshing.' : 'No points left. Add points to get masks.');
-}
-
-function clearSamPoints(){
-  samPoints=[]; samCandidates.innerHTML='<li class="empty">Add points to see masks.</li>'; samActiveCandidate=null; drawSamPoints(); clearSamOverlays(); enableSamButtons(); samSaveBtn.disabled=true; setHelp('Points cleared. Add new points.'); }
-
-function clearSamOverlays(){
-  samOverlay.getContext('2d').clearRect(0,0,samOverlay.width,samOverlay.height);
-}
-
-function drawSamPoints(){
-  const ctx = samPointsCanvas.getContext('2d');
-  ctx.clearRect(0,0,samPointsCanvas.width,samPointsCanvas.height);
-  if(!samImg.naturalWidth) return;
-  const scaleX = samImg.clientWidth / samImg.naturalWidth;
-  const scaleY = samImg.clientHeight / samImg.naturalHeight;
-  for(const p of samPoints){
-    ctx.beginPath();
-    ctx.fillStyle = p.positive? '#10b981':'#ef4444';
-    ctx.arc(p.x*scaleX, p.y*scaleY, 5, 0, Math.PI*2);
-    ctx.fill();
-    ctx.strokeStyle='#000'; ctx.lineWidth=2; ctx.stroke();
+function updateModalProgress(current, total) {
+  const percentage = total > 0 ? Math.round((current / total) * 100) : 0;
+  modalProgressCount.textContent = `${current} / ${total}`;
+  modalProgressBar.style.width = `${percentage}%`;
+  modalProgressPercent.textContent = `${percentage}%`;
+  minimizedCount.textContent = `${current}/${total}`;
+  
+  if (current > 0 && current < total) {
+    currentImageSection.hidden = false;
   }
 }
 
-async function samSegment(){
-  if(!samImageId || !samPoints.length) return;
-  samStatus.textContent='Segmenting...'; setHelp('Generating up to 3 mask proposals.');
-  try {
-    const payload = { image_id: samImageId, points: samPoints, accumulate: false, top_k:3 };
-    const resp = await fetch('/api/sam/segment', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-    const data = await resp.json();
-    if(!resp.ok){ samStatus.textContent=data.error||'Segmentation failed'; return; }
-    samCandidatesData = data.candidates || [];
-    if(data.point_summary && samPointSummary){
-      const ps = data.point_summary;
-      samPointSummary.textContent = `${ps.positive}+ / ${ps.negative}-`; }
-    renderSamCandidates();
-    samStatus.textContent = 'Candidates ready'; setHelp('Click a candidate to preview.');
-  } catch(e){ console.error(e); samStatus.textContent='Segment error'; }
+function updateModalStatus(title, subtitle) {
+  modalStatusTitle.textContent = title;
+  if (subtitle) {
+    modalStatusSubtitle.textContent = subtitle;
+  }
 }
 
-function renderSamCandidates(){
-  samCandidates.innerHTML='';
-  samCandidatesData.forEach(c=>{
-    const li = document.createElement('li');
-    li.dataset.rank=c.rank;
-    // Show area; if a prior candidate existed with same rank earlier, compute delta for quick visual reference
-    let delta = '';
-    if(window._lastAreas && window._lastAreas[c.rank]){
-      const prev = window._lastAreas[c.rank];
-      const diff = c.area - prev;
-      if(diff !== 0){
-        const sign = diff>0? '+' : '';
-        delta = `<span class="delta" style="color:${diff>0?'#10b981':'#ef4444'}">${sign}${diff}</span>`;
+function setModalComplete() {
+  updateModalStatus("Generation Complete!", "Your dataset variants are ready");
+  modalCancelBtn.textContent = "Close";
+  currentImageSection.hidden = true;
+}
+
+// Modal event listeners
+modalMinimizeBtn.addEventListener("click", minimizeModal);
+minimizedExpandBtn.addEventListener("click", expandModal);
+
+modalCancelBtn.addEventListener("click", () => {
+  if (modalCancelBtn.textContent === "Close") {
+    hideGenerationModal();
+  } else {
+    isGenerationCancelled = true;
+    updateModalStatus("Cancelling...", "Stopping generation");
+    modalCancelBtn.disabled = true;
+  }
+});
+
+function showStep(step) {
+  [stepDataset, stepTemplate, stepGenerate].forEach(s => {
+    s.hidden = s !== step;
+    s.classList.toggle("active", s === step);
+  });
+  if (step === stepDataset) {
+    phaseLabel.textContent = "Upload Dataset";
+    helpContent.textContent = "Upload multiple images to initialize a dataset.";
+  } else if (step === stepTemplate) {
+    phaseLabel.textContent = "Capture Templates";
+    helpContent.textContent = "Select reference images and add point prompts to create templates.";
+  } else if (step === stepGenerate) {
+    phaseLabel.textContent = "Generate";
+    helpContent.textContent = "Configure edits per template and generate all variants.";
+  }
+}
+
+// Step 1: Dataset Upload
+datasetImages.addEventListener("change", () => {
+  const files = Array.from(datasetImages.files);
+  if (!files.length) return;
+  datasetState.images = files.map(f => ({ filename: f.name, file: f }));
+  datasetInitBtn.disabled = false;
+  datasetStatus.textContent = `${files.length} image(s) ready`;
+  renderDatasetPreview();
+});
+
+function renderDatasetPreview() {
+  datasetPreview.innerHTML = "";
+  datasetState.images.slice(0, 6).forEach(img => {
+    const thumb = document.createElement("div");
+    thumb.className = "dataset-thumb";
+    const imgEl = document.createElement("img");
+    imgEl.src = URL.createObjectURL(img.file);
+    imgEl.alt = img.filename;
+    thumb.appendChild(imgEl);
+    const label = document.createElement("span");
+    label.textContent = img.filename;
+    thumb.appendChild(label);
+    datasetPreview.appendChild(thumb);
+  });
+  if (datasetState.images.length > 6) {
+    const more = document.createElement("div");
+    more.className = "dataset-thumb more";
+    more.textContent = `+${datasetState.images.length - 6} more`;
+    datasetPreview.appendChild(more);
+  }
+}
+
+datasetInitBtn.addEventListener("click", async () => {
+  datasetStatus.textContent = "Initializing...";
+  datasetInitBtn.disabled = true;
+  const form = new FormData();
+  datasetState.images.forEach(img => form.append("images", img.file));
+  try {
+    const resp = await fetch("/api/sam/dataset/init", { method: "POST", body: form });
+    const data = await resp.json();
+    if (!resp.ok) {
+      datasetStatus.textContent = data.error || "Init failed";
+      datasetInitBtn.disabled = false;
+      return;
+    }
+    datasetState.datasetId = data.dataset_id;
+    // Store image metadata from backend (includes IDs)
+    if (data.images) {
+      datasetState.images = datasetState.images.map((img, idx) => {
+        const backendImg = data.images.find(bi => bi.filename === img.filename) || data.images[idx];
+        return { ...img, id: backendImg?.id, filename: img.filename };
+      });
+    }
+    datasetStatus.textContent = `Dataset ${data.dataset_id} ready`;
+    showStep(stepTemplate);
+    renderReferenceGallery();
+  } catch (e) {
+    console.error(e);
+    if (e.message && e.message.includes("Failed to fetch")) {
+      datasetStatus.textContent = "Backend not ready - wait 10s and retry";
+    } else {
+      datasetStatus.textContent = "Error: " + (e.message || "Unknown");
+    }
+    datasetInitBtn.disabled = false;
+  }
+});
+
+// Step 2: Template Capture
+function renderReferenceGallery() {
+  if (!referenceGalleryFail || !referenceGalleryPass) return;
+  referenceGalleryFail.innerHTML = "";
+  referenceGalleryPass.innerHTML = "";
+  // Expanded heuristic sets (tunable)
+  const FAIL_KEYS = ['fail','bad','defect','error','reject','ng'];
+  const PASS_KEYS = ['pass','ok','good','clean','normal','baseline'];
+  const failImgs = [];
+  const passImgs = [];
+  // Scan all images until both buckets filled (up to 5 each)
+  for (const img of datasetState.images) {
+    const lower = img.filename.toLowerCase();
+    let tagged = false;
+    if (FAIL_KEYS.some(k => lower.includes(k))) { failImgs.push(img); tagged = true; }
+    else if (PASS_KEYS.some(k => lower.includes(k))) { passImgs.push(img); tagged = true; }
+    if (!tagged) {
+      // If ambiguous, prefer pass bucket unless already full
+      (passImgs.length < 5 ? passImgs : failImgs).push(img);
+    }
+    if (failImgs.length >= 5 && passImgs.length >= 5) break;
+  }
+  const build = (list, target) => {
+    list.slice(0,5).forEach(img => {
+      const card = document.createElement("div");
+      card.className = "reference-card";
+      const imgEl = document.createElement("img");
+      imgEl.src = URL.createObjectURL(img.file);
+      imgEl.alt = img.filename;
+      card.appendChild(imgEl);
+      const label = document.createElement("span");
+      label.textContent = img.filename;
+      card.appendChild(label);
+      card.addEventListener("click", (e) => selectReference(img, e.currentTarget));
+      target.appendChild(card);
+    });
+  };
+  build(failImgs, referenceGalleryFail);
+  build(passImgs, referenceGalleryPass);
+  templateAddBtn.disabled = false;
+}
+
+function selectReference(img, cardEl) {
+  datasetState.currentReferenceFile = img.file;
+  datasetState.currentReferenceFilename = img.filename;
+  datasetState.currentReferenceId = img.id;
+  datasetState.currentPoints = [];
+  pointCaptureBlock.hidden = false;
+  templateImg.src = URL.createObjectURL(img.file);
+  templateImg.onload = () => {
+    resizeTemplateCanvas();
+    drawTemplatePoints();
+  };
+  templateSaveBtn.disabled = true;
+  templateClearBtn.disabled = true;
+  pointCount.textContent = "";
+  templateStatus.textContent = `Adding points to ${img.filename}`;
+  // Clear active across both galleries
+  [ ...(referenceGalleryFail?.children || []), ...(referenceGalleryPass?.children || []) ].forEach(c => c.classList.remove("active"));
+  if (cardEl) cardEl.classList.add("active");
+}
+
+function resizeTemplateCanvas() {
+  const displayWidth = templateImg.clientWidth;
+  const displayHeight = templateImg.clientHeight;
+  templatePointsCanvas.width = displayWidth;
+  templatePointsCanvas.height = displayHeight;
+  templatePointsCanvas.style.width = displayWidth + 'px';
+  templatePointsCanvas.style.height = displayHeight + 'px';
+  // Also resize mask canvas to match
+  templateMaskCanvas.width = displayWidth;
+  templateMaskCanvas.height = displayHeight;
+  templateMaskCanvas.style.width = displayWidth + 'px';
+  templateMaskCanvas.style.height = displayHeight + 'px';
+}
+
+let currentMaskData = null;
+
+window.addEventListener("resize", () => {
+  if (!pointCaptureBlock.hidden) {
+    resizeTemplateCanvas();
+    drawTemplatePoints();
+    // Redraw mask overlay if it exists
+    if (currentMaskData) {
+      drawMaskOverlay(currentMaskData);
+    }
+  }
+});
+
+function drawTemplatePoints() {
+  const ctx = templatePointsCanvas.getContext("2d");
+  ctx.clearRect(0, 0, templatePointsCanvas.width, templatePointsCanvas.height);
+  if (!templateImg.naturalWidth) return;
+  const scaleX = templateImg.clientWidth / templateImg.naturalWidth;
+  const scaleY = templateImg.clientHeight / templateImg.naturalHeight;
+  for (const p of datasetState.currentPoints) {
+    ctx.beginPath();
+    ctx.fillStyle = p.positive ? "#10b981" : "#ef4444";
+    ctx.arc(p.x * scaleX, p.y * scaleY, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+}
+
+let previewDebounceTimeout = null;
+
+function debouncedMaskPreview() {
+  // Debounce mask preview by 800ms to avoid excessive API calls
+  clearTimeout(previewDebounceTimeout);
+  previewDebounceTimeout = setTimeout(() => {
+    if (datasetState.currentPoints.length > 0) {
+      templatePreviewBtn.click();
+    }
+  }, 800);
+}
+
+function addTemplatePoint(x, y, positive) {
+  datasetState.currentPoints.push({ x, y, positive });
+  drawTemplatePoints();
+  clearMaskOverlay(); // Clear previous mask when adding new point
+  templateSaveBtn.disabled = datasetState.currentPoints.length === 0;
+  templateClearBtn.disabled = datasetState.currentPoints.length === 0;
+  templatePreviewBtn.disabled = datasetState.currentPoints.length === 0;
+  const pos = datasetState.currentPoints.filter(p => p.positive).length;
+  const neg = datasetState.currentPoints.length - pos;
+  pointCount.textContent = `${pos}+ / ${neg}-`;
+  
+  // Trigger debounced preview
+  debouncedMaskPreview();
+}
+
+templateImg.addEventListener("contextmenu", e => e.preventDefault());
+templateImg.addEventListener("click", e => handleTemplateClick(e, true));
+templateImg.addEventListener("mousedown", e => {
+  if (e.button === 2) handleTemplateClick(e, false);
+});
+
+function handleTemplateClick(e, positive) {
+  if (!datasetState.currentReferenceFile) return;
+  const rect = templateImg.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (templateImg.naturalWidth / rect.width);
+  const y = (e.clientY - rect.top) * (templateImg.naturalHeight / rect.height);
+  addTemplatePoint(Math.round(x), Math.round(y), positive && !e.shiftKey);
+}
+
+templateClearBtn.addEventListener("click", () => {
+  datasetState.currentPoints = [];
+  drawTemplatePoints();
+  clearMaskOverlay();
+  templateSaveBtn.disabled = true;
+  templateClearBtn.disabled = true;
+  templatePreviewBtn.disabled = true;
+  pointCount.textContent = "";
+});
+
+// Preview SAM mask
+templatePreviewBtn.addEventListener("click", async () => {
+  if (!datasetState.currentPoints.length) return;
+  templateStatus.textContent = "Generating mask preview...";
+  templatePreviewBtn.disabled = true;
+  const w = templateImg.naturalWidth;
+  const h = templateImg.naturalHeight;
+  const normalizedPoints = datasetState.currentPoints.map(p => ({
+    x_norm: p.x / w,
+    y_norm: p.y / h,
+    positive: p.positive
+  }));
+  try {
+    const resp = await fetch("/api/sam/dataset/point_preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dataset_id: datasetState.datasetId,
+        image_id: datasetState.currentReferenceId,
+        points: normalizedPoints
+      })
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      templateStatus.textContent = data.error || "Preview failed";
+      templatePreviewBtn.disabled = false;
+      return;
+    }
+    // Draw mask overlay and store for resize events
+    currentMaskData = data.mask_png;
+    drawMaskOverlay(currentMaskData);
+    templateStatus.textContent = `Mask preview (score: ${data.score.toFixed(2)})`;
+    templatePreviewBtn.disabled = false;
+  } catch (e) {
+    console.error(e);
+    templateStatus.textContent = "Preview error";
+    templatePreviewBtn.disabled = false;
+  }
+});
+
+function drawMaskOverlay(maskPngBase64) {
+  const img = new Image();
+  img.onload = () => {
+    const ctx = templateMaskCanvas.getContext("2d");
+    ctx.clearRect(0, 0, templateMaskCanvas.width, templateMaskCanvas.height);
+    
+    // Create temporary canvas to process mask
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = templateMaskCanvas.width;
+    tempCanvas.height = templateMaskCanvas.height;
+    const tempCtx = tempCanvas.getContext('2d');
+    
+    // Draw grayscale mask to temp canvas
+    tempCtx.drawImage(img, 0, 0, tempCanvas.width, tempCanvas.height);
+    
+    // Get pixel data
+    const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+    const data = imageData.data;
+    
+    // Convert grayscale to green overlay (only where mask is white/bright)
+    for (let i = 0; i < data.length; i += 4) {
+      const brightness = data[i]; // Grayscale value (0=black, 255=white)
+      if (brightness > 128) { // If pixel is part of mask (bright)
+        data[i] = 16;      // R (green color #10b981)
+        data[i + 1] = 185; // G
+        data[i + 2] = 129; // B
+        data[i + 3] = brightness * 0.5; // Alpha (semi-transparent)
+      } else {
+        data[i + 3] = 0; // Fully transparent (no mask here)
       }
     }
-    li.innerHTML = `<span>#${c.rank}</span><span class="score">${c.score.toFixed(3)}</span><span>${c.area}</span>${delta}`;
-    li.addEventListener('click', ()=> selectSamCandidate(c.rank));
-    samCandidates.appendChild(li);
-  });
-  // Store current areas for next comparison
-  window._lastAreas = Object.fromEntries(samCandidatesData.map(c=>[c.rank, c.area]));
-  if(samCandidatesData.length){ selectSamCandidate(1); }
-}
-
-function selectSamCandidate(rank){
-  samActiveCandidate = samCandidatesData.find(c=>c.rank===rank);
-  [...samCandidates.children].forEach(li=> li.classList.toggle('active', parseInt(li.dataset.rank,10)===rank));
-  drawSamCandidate();
-  samSaveBtn.disabled = !samActiveCandidate;
-  if(samActiveCandidate) setHelp('Optionally name the component then Save.');
-}
-
-function drawSamCandidate(){
-  clearSamOverlays();
-  if(!samActiveCandidate) return;
-  const ctx = samOverlay.getContext('2d');
-  const img = new Image();
-  img.onload = ()=>{
-    samOverlay.width = samImg.clientWidth; samOverlay.height = samImg.clientHeight;
-    const scaleX = samImg.clientWidth / img.width; const scaleY = samImg.clientHeight / img.height;
-    ctx.globalAlpha = 0.35; ctx.drawImage(img,0,0,img.width,img.height,0,0,img.width*scaleX,img.height*scaleY); ctx.globalAlpha=1;
-    ctx.strokeStyle='#3b82f6'; ctx.lineWidth=2; ctx.setLineDash([6,4]);
-    // Derive bbox from candidate
-    const b = samActiveCandidate.bbox;
-    ctx.strokeRect(b[0]*scaleX, b[1]*scaleY, (b[2]-b[0])*scaleX, (b[3]-b[1])*scaleY);
+    
+    // Draw processed overlay
+    ctx.putImageData(imageData, 0, 0);
   };
-  img.src = 'data:image/png;base64,'+samActiveCandidate.mask_png;
+  img.src = "data:image/png;base64," + maskPngBase64;
 }
 
-samInitBtn.addEventListener('click', samInit);
-samUndoBtn.addEventListener('click', undoSamPoint);
-samClearBtn.addEventListener('click', clearSamPoints);
-samRefreshBtn.addEventListener('click', samSegment);
-
-samImg.addEventListener('contextmenu', e=> e.preventDefault());
-samImg.addEventListener('click', e => handleSamClick(e, true));
-samImg.addEventListener('mousedown', e => { if(e.button===2) handleSamClick(e,false); });
-samImg.addEventListener('mousemove', ()=>{});
-window.addEventListener('keydown', e=>{
-  if(samPanel.hidden) return;
-  if(e.key==='u' || (e.ctrlKey && e.key==='z')) { undoSamPoint(); }
-  if(e.key==='Escape'){ clearSamPoints(); }
-  if(e.key==='1') selectSamCandidate(1);
-  if(e.key==='2') selectSamCandidate(2);
-  if(e.key==='3') selectSamCandidate(3);
+templateSaveBtn.addEventListener("click", async () => {
+  if (!datasetState.currentPoints.length || !datasetState.currentReferenceFilename) return;
+  templateStatus.textContent = "Saving template...";
+  templateSaveBtn.disabled = true;
+  const w = templateImg.naturalWidth;
+  const h = templateImg.naturalHeight;
+  const normalizedPoints = datasetState.currentPoints.map(p => ({
+    x_norm: p.x / w,
+    y_norm: p.y / h,
+    positive: p.positive
+  }));
+  const payload = {
+    dataset_id: datasetState.datasetId,
+    image_filename: datasetState.currentReferenceFilename,
+    points: normalizedPoints,
+    name: templateName.value.trim() || undefined,
+    class: templateClass.value || undefined
+  };
+  try {
+    const resp = await fetch("/api/sam/dataset/template/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      templateStatus.textContent = data.error || "Save failed";
+      templateSaveBtn.disabled = false;
+      return;
+    }
+    templateStatus.textContent = "Template saved";
+    datasetState.templates.push({
+      template_id: data.template_id,
+      name: data.name || `Template ${datasetState.templates.length + 1}`,
+      class: data.class || '',
+      image_filename: datasetState.currentReferenceFilename,
+      points: normalizedPoints,
+      edits: {}
+    });
+    renderTemplateList();
+    datasetState.currentPoints = [];
+    drawTemplatePoints();
+    clearMaskOverlay();
+    templateName.value = "";
+    templateClass.value = "";
+    templateSaveBtn.disabled = true;
+    templateClearBtn.disabled = true;
+    templatePreviewBtn.disabled = true;
+    pointCount.textContent = "";
+    pointCaptureBlock.hidden = true;
+  // Remove active selection across both galleries
+  [ ...(referenceGalleryFail?.children || []), ...(referenceGalleryPass?.children || []) ].forEach(c => c.classList.remove("active"));
+  } catch (e) {
+    console.error(e);
+    templateStatus.textContent = "Error";
+    templateSaveBtn.disabled = false;
+  }
 });
 
-function handleSamClick(e, positive){
-  if(!samImageId) return;
-  const rect = samImg.getBoundingClientRect();
-  const x = (e.clientX - rect.left) * (samImg.naturalWidth / rect.width);
-  const y = (e.clientY - rect.top) * (samImg.naturalHeight / rect.height);
-  addSamPoint(Math.round(x), Math.round(y), positive && !e.shiftKey);
+function clearMaskOverlay() {
+  currentMaskData = null;
+  const ctx = templateMaskCanvas.getContext("2d");
+  ctx.clearRect(0, 0, templateMaskCanvas.width, templateMaskCanvas.height);
 }
 
-samSaveBtn.addEventListener('click', async ()=>{
-  if(!samActiveCandidate || !samImageId) return;
-  const name = samComponentName.value.trim() || undefined;
-  const payload = { image_id: samImageId, mask_png: samActiveCandidate.mask_png, score: samActiveCandidate.score, name };
-  try {
-    const resp = await fetch('/api/sam/save_component', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-    const data = await resp.json();
-    if(!resp.ok){ samStatus.textContent = data.error || 'Save failed'; return; }
-  samStatus.textContent = 'Component saved'; setHelp('Component stored. Adjust sliders below or add more components.');
-    samComponentName.value='';
-    loadSamComponents();
-  } catch(e){ console.error(e); samStatus.textContent='Save error'; }
+function renderTemplateList() {
+  templateList.innerHTML = "";
+  if (!datasetState.templates.length) {
+    templateList.innerHTML = '<div class="hint">No templates yet. Click a reference image to create one.</div>';
+    proceedToEditsBtn.disabled = true;
+    return;
+  }
+  datasetState.templates.forEach((t, idx) => {
+    const card = document.createElement("div");
+    card.className = "template-card";
+    const classLabel = t.class ? ` [${t.class}]` : '';
+    card.innerHTML = `
+      <strong>${t.name}${classLabel}</strong>
+      <span class="template-meta">${t.image_filename} · ${t.points.length} pt(s)</span>
+    `;
+    templateList.appendChild(card);
+  });
+  proceedToEditsBtn.disabled = false;
+}
+
+proceedToEditsBtn.addEventListener("click", () => {
+  showStep(stepGenerate);
+  renderTemplateEdits();
+  templatePreviewSection.hidden = false; // Show preview section
 });
 
-async function loadSamComponents(){
-  if(!samImageId) return;
+// Template preview before generation
+previewTemplateBtn.addEventListener("click", async () => {
+  const classFilter = previewClassFilter.value;
+  previewStatus.textContent = "Generating preview...";
+  previewTemplateBtn.disabled = true;
+  
+  // Find first matching image based on class filter
+  let targetImage = null;
+  if (classFilter) {
+    targetImage = datasetState.images.find(img => 
+      img.filename.toLowerCase().includes(classFilter)
+    );
+    if (!targetImage) {
+      previewStatus.textContent = `No ${classFilter} images found in dataset`;
+      previewTemplateBtn.disabled = false;
+      return;
+    }
+  } else {
+    targetImage = datasetState.images[0];
+  }
+  
+  const edits = {};
+  datasetState.templates.forEach(t => {
+    edits[t.template_id] = t.edits || {};
+  });
+  
   try {
-    const resp = await fetch(`/api/sam/components?image_id=${samImageId}`);
+    const resp = await fetch("/api/sam/dataset/template/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dataset_id: datasetState.datasetId,
+        edits,
+        image_id: targetImage.id,
+        class_filter: classFilter
+      })
+    });
     const data = await resp.json();
-    if(!resp.ok){ samComponentsPanel.hidden=true; return; }
-    samSavedComponents = data.components || [];
-    renderSamSavedComponents();
-    samComponentsPanel.hidden = samSavedComponents.length===0;
-  } catch(e){ console.error(e); }
-}
+    if (!resp.ok) {
+      previewStatus.textContent = data.error || "Preview failed";
+      previewTemplateBtn.disabled = false;
+      return;
+    }
+    previewResultImg.src = "data:image/png;base64," + data.variant_png;
+    previewResultImg.style.display = "block";
+    previewPlaceholder.style.display = "none";
+    const classLabel = classFilter ? ` [${classFilter}]` : '';
+    previewStatus.textContent = `Preview${classLabel}: ${data.filename}`;
+    previewTemplateBtn.disabled = false;
+  } catch (e) {
+    console.error(e);
+    previewStatus.textContent = "Error: " + (e.message || "Unknown");
+    previewTemplateBtn.disabled = false;
+  }
+});
 
-function renderSamSavedComponents(){
-  samSavedList.innerHTML='';
-  samSavedComponents.forEach(c=>{
-    const chip = document.createElement('div');
-    chip.className='chip';
-    chip.textContent = `${c.name||'comp_'+c.id} (${c.id})`;
-    chip.addEventListener('click', ()=> selectSamSaved(c.id));
-    if(c.id===samActiveSaved) chip.classList.add('active');
-    samSavedList.appendChild(chip);
+// Step 3: Edit Configuration & Generation
+function renderTemplateEdits() {
+  templateEditsList.innerHTML = "";
+  datasetState.templates.forEach((template, idx) => {
+    const block = document.createElement("div");
+    block.className = "template-edit-block";
+    const header = document.createElement("h4");
+    header.textContent = template.name;
+    block.appendChild(header);
+    const editsGrid = document.createElement("div");
+    editsGrid.className = "edits-grid";
+    editsGrid.dataset.templateIdx = idx;
+    const fields = [
+      { key: "brightness", label: "Darker ←→ Lighter", min: -1, max: 1, step: 0.02, def: 0, 
+        tooltip: "Adjusts overall brightness. Negative values make darker (shadows), positive values make lighter (highlights). Range: -1 to +1" },
+      { key: "contrast", label: "Flatter ←→ Punchier", min: -1, max: 1, step: 0.02, def: 0,
+        tooltip: "Controls difference between light and dark areas. Negative reduces contrast (flatter), positive increases contrast (punchier). Range: -1 to +1" },
+      { key: "gamma", label: "Lift Shadows ←→ Deepen", min: -0.9, max: 2, step: 0.05, def: 0,
+        tooltip: "Non-linear brightness adjustment. Negative lifts shadows (brightens dark areas), positive deepens shadows (darkens dark areas while keeping highlights). Range: -0.9 to +2" },
+      { key: "hue", label: "Hue Rotate", min: -180, max: 180, step: 1, def: 0,
+        tooltip: "Rotates colors on color wheel. 0=original, ±60=subtle shift, ±120=complementary colors, ±180=opposite colors. Range: -180° to +180°" },
+      { key: "saturation", label: "Muted ←→ Vivid", min: -1, max: 3, step: 0.05, def: 0,
+        tooltip: "Controls color intensity. Negative desaturates (grayscale), 0=original, positive intensifies colors (more vivid). Range: -1 to +3" },
+      { key: "sharpen", label: "Softer ←→ Sharper", min: 0, max: 2, step: 0.1, def: 0,
+        tooltip: "Enhances edge definition. 0=no sharpening, 1=moderate sharpening, 2=maximum sharpening (may create artifacts). Range: 0 to 2" },
+      { key: "noise", label: "Clean ←→ Texture", min: 0, max: 0.2, step: 0.01, def: 0,
+        tooltip: "Adds grain/texture. 0=clean, 0.05=subtle texture, 0.1=moderate grain, 0.2=heavy texture. Useful for matching photo grain. Range: 0 to 0.2" },
+      { key: "opacity", label: "Transparent ←→ Solid", min: 0, max: 1, step: 0.02, def: 1,
+        tooltip: "Blends edited region with original. 0=fully transparent (original shows), 0.5=50% blend, 1=fully opaque (only edited shows). Range: 0 to 1" }
+    ];
+    fields.forEach(f => {
+      const val = template.edits[f.key] !== undefined ? template.edits[f.key] : f.def;
+      const wrap = document.createElement("label");
+      wrap.title = f.tooltip; // Add native browser tooltip
+      wrap.className = "edit-field-label";
+      wrap.innerHTML = `<span class="edit-label-text" data-tooltip="${f.tooltip}">${f.label} <span class="tooltip-icon">?</span></span><input type="range" data-field="${f.key}" value="${val}" min="${f.min}" max="${f.max}" step="${f.step}" /><input type="number" data-sync-field="${f.key}" value="${val}" min="${f.min}" max="${f.max}" step="${f.step}" />`;
+      editsGrid.appendChild(wrap);
+    });
+    block.appendChild(editsGrid);
+    templateEditsList.appendChild(block);
   });
-  if(!samActiveSaved && samSavedComponents.length){ selectSamSaved(samSavedComponents[0].id); }
-  // Enable continue if at least one component
-  if(toEditPhase) toEditPhase.disabled = samSavedComponents.length===0;
+  generateBtn.disabled = false;
 }
 
-function selectSamSaved(id){
-  samActiveSaved = id;
-  renderSamSavedComponents();
-  buildSamEdits();
-}
-
-function buildSamEdits(){
-  samEditsList.innerHTML='';
-  if(!samActiveSaved) { samApplyBtn.disabled=true; return; }
-  // Qualitative slider mapping (human names -> backend keys)
-  const fields = [
-    {key:'brightness', label:'Darker ←→ Lighter', min:-1, max:1, step:0.02, def:0},
-    {key:'contrast', label:'Flatter ←→ Punchier', min:-1, max:1, step:0.02, def:0},
-    {key:'gamma', label:'Lift Shadows ←→ Deepen', min:-0.9, max:2, step:0.05, def:0},
-    {key:'hue', label:'Hue Rotate', min:-180, max:180, step:1, def:0},
-    {key:'saturation', label:'Muted ←→ Vivid', min:-1, max:3, step:0.05, def:0},
-    {key:'sharpen', label:'Softer ←→ Sharper', min:0, max:2, step:0.1, def:0},
-    {key:'noise', label:'Clean ←→ Texture', min:0, max:0.2, step:0.01, def:0},
-    {key:'opacity', label:'Transparent ←→ Solid', min:0, max:1, step:0.02, def:1}
-  ];
-  const state = samEditsMap[samActiveSaved] || {}; samEditsMap[samActiveSaved]=state;
-  fields.forEach(f=>{
-    const val = (f.key in state)? state[f.key]: f.def;
-    const wrap = document.createElement('label');
-    wrap.innerHTML = `${f.label}<input type="range" data-field="${f.key}" value="${val}" min="${f.min}" max="${f.max}" step="${f.step}" /><input type="number" data-sync-field="${f.key}" value="${val}" min="${f.min}" max="${f.max}" step="${f.step}" />`;
-    samEditsList.appendChild(wrap);
-  });
-  samApplyBtn.disabled=false;
-  setHelp('Tweak sliders, then Apply to see result.');
-}
-
-samEditsList.addEventListener('input', e=>{
+templateEditsList.addEventListener("input", e => {
   const t = e.target;
-  if(t.matches('input[data-field]')){
-    const field = t.dataset.field; const num = samEditsList.querySelector(`input[data-sync-field="${field}"]`); if(num) num.value = t.value;
-    if(!samEditsMap[samActiveSaved]) samEditsMap[samActiveSaved]={};
-    samEditsMap[samActiveSaved][field] = parseFloat(t.value);
-  } else if(t.matches('input[data-sync-field]')){
-    const field = t.dataset.syncField; const range = samEditsList.querySelector(`input[data-field="${field}"]`); if(range) range.value = t.value;
-    if(!samEditsMap[samActiveSaved]) samEditsMap[samActiveSaved]={};
-    samEditsMap[samActiveSaved][field] = parseFloat(t.value);
+  const grid = t.closest(".edits-grid");
+  if (!grid) return;
+  const idx = parseInt(grid.dataset.templateIdx, 10);
+  if (t.matches("input[data-field]")) {
+    const field = t.dataset.field;
+    const num = grid.querySelector(`input[data-sync-field="${field}"]`);
+    if (num) num.value = t.value;
+    datasetState.templates[idx].edits[field] = parseFloat(t.value);
+  } else if (t.matches("input[data-sync-field]")) {
+    const field = t.dataset.syncField;
+    const range = grid.querySelector(`input[data-field="${field}"]`);
+    if (range) range.value = t.value;
+    datasetState.templates[idx].edits[field] = parseFloat(t.value);
   }
 });
 
-samApplyBtn.addEventListener('click', async ()=>{
-  if(!samImageId || !samSavedComponents.length) return;
-  samApplyStatus.textContent='Applying...';
+generateBtn.addEventListener("click", async () => {
+  generateBtn.disabled = true;
+  generateStatus.textContent = "Starting generation...";
+  generateResults.innerHTML = "<div style='text-align:center; padding:2rem; color:#8ea1af; font-size:0.65rem;'>Generating... Results will download automatically. Check status above.</div>";
+  datasetState.results = [];
+  
+  // Show modal ONLY when button is clicked
+  showGenerationModal();
+  updateModalStatus("Segmenting and applying edits...", "This may take a few moments");
+  
+  const edits = {};
+  datasetState.templates.forEach(t => {
+    edits[t.template_id] = t.edits || {};
+  });
+  const payload = {
+    dataset_id: datasetState.datasetId,
+    edits
+  };
   try {
-  const edits = Object.entries(samEditsMap).map(([cid,vals])=>({ component_id: parseInt(cid,10), ...vals }));
-    const payload = { image_id: samImageId, edits, export_mask: (edits.length===1) };
-    const resp = await fetch('/api/sam/apply', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-    const data = await resp.json();
-    if(!resp.ok){ samApplyStatus.textContent = data.error || 'Apply failed'; return; }
-    samApplyStatus.textContent='Done';
-    if(data.variant_png){ samEditedImg.src='data:image/png;base64,'+data.variant_png; samDownloadBtn.disabled=false; }
-    if(data.component_mask_png){ samDownloadBtn.dataset.maskPng = data.component_mask_png; }
-    setHelp('Preview updated. Download if satisfied or refine sliders.');
-  } catch(e){ console.error(e); samApplyStatus.textContent='Error'; }
-});
-
-samDownloadBtn.addEventListener('click', ()=>{
-  if(!samEditedImg.src) return;
-  const a = document.createElement('a'); a.href=samEditedImg.src; a.download='variant.png'; a.click();
-  if(samDownloadBtn.dataset.maskPng){
-    const a2 = document.createElement('a'); a2.href='data:image/png;base64,'+samDownloadBtn.dataset.maskPng; a2.download='component_mask.png'; a2.click();
+    const resp = await fetch("/api/sam/dataset/apply_stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    if (!resp.ok) {
+      const err = await resp.json();
+      generateStatus.textContent = err.error || "Generation failed";
+      updateModalStatus("Error", err.error || "Generation failed");
+      modalCancelBtn.textContent = "Close";
+      generateBtn.disabled = false;
+      return;
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let processedCount = 0;
+    while (true) {
+      if (isGenerationCancelled) {
+        reader.cancel();
+        generateStatus.textContent = "Generation cancelled";
+        hideGenerationModal();
+        generateBtn.disabled = false;
+        return;
+      }
+      
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split(/\n\n/);
+      buffer = parts.pop() || "";
+      for (const chunk of parts) {
+        const line = chunk.trim();
+        if (!line.startsWith("data:")) continue;
+        const payloadStr = line.slice(5).trim();
+        if (payloadStr === "[DONE]" || payloadStr.includes('"done":true')) {
+          generateStatus.textContent = `Complete! Downloaded ${datasetState.results.length} images`;
+          setModalComplete();
+          await downloadAllResults();
+          generateBtn.disabled = false;
+          // Auto-hide modal after 3 seconds
+          setTimeout(() => hideGenerationModal(), 3000);
+          return;
+        }
+        try {
+          const obj = JSON.parse(payloadStr);
+          if (obj.variant_png) {
+            datasetState.results.push(obj);
+            processedCount++;
+            generateStatus.textContent = `Generating... ${processedCount} / ${datasetState.images.length} images`;
+            updateModalProgress(processedCount, datasetState.images.length);
+            if (obj.filename) {
+              currentImageName.textContent = obj.filename;
+            }
+          }
+        } catch (e) {
+          /* ignore partial JSON */
+        }
+      }
+    }
+    generateStatus.textContent = `Complete! Downloaded ${datasetState.results.length} images`;
+    setModalComplete();
+    await downloadAllResults();
+    generateBtn.disabled = false;
+    // Auto-hide modal after 3 seconds
+    setTimeout(() => hideGenerationModal(), 3000);
+  } catch (e) {
+    console.error(e);
+    generateStatus.textContent = "Error: " + (e.message || "Unknown");
+    updateModalStatus("Error", e.message || "Unknown error occurred");
+    modalCancelBtn.textContent = "Close";
+    generateBtn.disabled = false;
   }
 });
 
-function fetchAndUpdateSaved(){ loadSamComponents(); }
-// Optional periodic refresh removed (unnecessary in simplified workflow)
+// Auto-download results as they're generated
+async function downloadAllResults() {
+  if (!datasetState.results.length) return;
+  generateStatus.textContent = "Creating ZIP...";
+  const zip = new JSZip();
+  const folder = zip.folder("variants");
+  datasetState.results.forEach((res, idx) => {
+    const imgData = res.variant_png;
+    folder.file(res.filename || `variant_${idx}.png`, imgData, { base64: true });
+  });
+  const blob = await zip.generateAsync({ type: "blob" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `dataset_${datasetState.datasetId.substring(0, 8)}_variants.zip`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  generateStatus.textContent = `Downloaded ${datasetState.results.length} images as ZIP`;
+}
 
-// Removed classic segmentation & preset code.
+// downloadAllBtn no longer needed - auto-download on generate complete
 
-// Phase navigation
-if(backToUpload){ backToUpload.addEventListener('click', ()=> showPhase(1)); }
-if(toEditPhase){ toEditPhase.addEventListener('click', ()=> { if(!toEditPhase.disabled) showPhase(3); }); }
-if(backToSegment){ backToSegment.addEventListener('click', ()=> showPhase(2)); }
+downloadAllBtn.addEventListener("click", async () => {
+  if (!datasetState.results.length) return;
+  downloadAllBtn.disabled = true;
+  generateStatus.textContent = "Creating ZIP...";
+  try {
+    const zip = new JSZip();
+    for (const r of datasetState.results) {
+      const base64 = r.variant_png;
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      zip.file(r.filename.replace(/\.(jpg|jpeg|png)$/i, "_variant.png"), bytes);
+    }
+    const blob = await zip.generateAsync({ type: "blob" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `dataset_${datasetState.datasetId}_variants.zip`;
+    a.click();
+    URL.revokeObjectURL(url);
+    generateStatus.textContent = "ZIP downloaded";
+  } catch (e) {
+    console.error(e);
+    generateStatus.textContent = "ZIP error";
+  }
+  downloadAllBtn.disabled = false;
+});
 
-// Initialize phase 1
-showPhase(1);
+backToTemplates.addEventListener("click", () => {
+  showStep(stepTemplate);
+});
+
+// Tooltip system for edit parameters
+let activeTooltip = null;
+
+function showCustomTooltip(element, text) {
+  hideCustomTooltip();
+  const tooltip = document.createElement('div');
+  tooltip.className = 'custom-tooltip show';
+  tooltip.textContent = text;
+  element.style.position = 'relative';
+  element.appendChild(tooltip);
+  activeTooltip = tooltip;
+}
+
+function hideCustomTooltip() {
+  if (activeTooltip) {
+    activeTooltip.remove();
+    activeTooltip = null;
+  }
+}
+
+// Add hover listeners for tooltips
+document.addEventListener('mouseover', (e) => {
+  const labelText = e.target.closest('.edit-label-text');
+  if (labelText) {
+    const tooltipText = labelText.dataset.tooltip;
+    if (tooltipText) {
+      showCustomTooltip(labelText, tooltipText);
+    }
+  }
+});
+
+document.addEventListener('mouseout', (e) => {
+  const labelText = e.target.closest('.edit-label-text');
+  if (labelText) {
+    hideCustomTooltip();
+  }
+});
+
+// Request notification permission
+if ("Notification" in window && Notification.permission === "default") {
+  Notification.requestPermission();
+}
+
+showStep(stepDataset);

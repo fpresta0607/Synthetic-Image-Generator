@@ -6,12 +6,16 @@
   "scripts": {
     "start": "node server.js",
     "dev:win": "powershell -NoLogo -NoProfile -Command \"$env:PY_APP='..\\py\\app.py'; Start-Process powershell -ArgumentList '-NoLogo','-NoProfile','-Command','cd ..\\py; if(-not (Test-Path .venv)) { python -m venv .venv }; .\\.venv\\Scripts\\Activate.ps1; pip install -q -r requirements-sam.txt; python app.py' -WindowStyle Normal; node server.js\"",
-    "dev": "node scripts/dev.mjs"
+    "dev": "node scripts/dev.mjs",
+    "test": "node --test"
   },
   "dependencies": {
     "express": "^4.19.2",
     "multer": "^1.4.5-lts.1",
     "node-fetch": "^3.3.2",
     "form-data": "^4.0.0"
+  },
+  "devDependencies": {
+    "supertest": "^6.3.4"
   }
 }

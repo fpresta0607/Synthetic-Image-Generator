@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "npm run dev -w server",
     "dev:win": "npm run dev:win -w server",
-    "start": "npm run start -w server"
+    "start": "npm run start -w server",
+    "test": "npm run test -w server"
   }
 }

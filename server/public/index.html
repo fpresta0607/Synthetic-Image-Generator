@@ -2,119 +2,198 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>SAM Interactive Segmentation & Edits</title>
+  <title>SAM Bulk Dataset Generator</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header>
-    <h1>SAM Interactive Segmentation</h1>
-    <p class="tagline">Upload → Add Points → Pick Mask → Save Component → Adjust → Apply</p>
+    <h1>SAM Bulk Dataset Generator</h1>
+    <p class="tagline">Upload Dataset → Capture Templates → Apply Edits → Generate Variants</p>
   </header>
-  <main class="wizard">
+  <main class="dataset-workflow">
     <aside id="helpPanel" class="help-panel" aria-live="polite">
       <h3>Help</h3>
-      <div id="helpContent">Step 1: Upload an image to begin.</div>
-      <div class="phase-indicator"><span id="phaseLabel">Upload</span></div>
+      <div id="helpContent">Upload multiple images to create a dataset.</div>
+      <div class="phase-indicator"><span id="phaseLabel">Upload Dataset</span></div>
     </aside>
-    <!-- Phase 1: Upload / Init -->
-    <section class="panel phase active" id="phase1" data-phase="1" aria-labelledby="phase1Heading">
-      <h2 id="phase1Heading">Phase 1 · Upload</h2>
-      <p class="phase-desc">Choose an image and initialize the SAM model. This prepares embeddings for interactive segmentation.</p>
+
+    <!-- Step 1: Dataset Upload -->
+    <section class="panel workflow-step active" id="stepDataset" aria-labelledby="stepDatasetHeading">
+      <h2 id="stepDatasetHeading">Step 1 · Upload Dataset</h2>
+      <p class="phase-desc">Upload multiple images (JPG/PNG). Each will be processed using templates you define in the next step.</p>
       <div class="controls-row">
-        <label class="file-label">Image
-          <input type="file" id="imageInput" accept="image/*" />
+        <label class="file-label">Images (multiple)
+          <input type="file" id="datasetImages" accept="image/*" multiple />
         </label>
-        <button id="samInitBtn" disabled>Init & Continue →</button>
-        <span id="samStatus" class="status" aria-live="polite"></span>
+        <button id="datasetInitBtn" disabled>Initialize Dataset →</button>
+        <span id="datasetStatus" class="status" aria-live="polite"></span>
       </div>
-      <div class="phase-nav single">
-        <span class="hint">Model must load once per server start. Ensure checkpoint exists.</span>
-      </div>
+      <div id="datasetPreview" class="dataset-preview"></div>
     </section>
 
-    <!-- Phase 2: Point Prompt & Component Saving -->
-    <section class="panel phase" id="phase2" data-phase="2" aria-labelledby="phase2Heading" hidden>
-      <h2 id="phase2Heading">Phase 2 · Segment & Save Components</h2>
-      <p class="phase-desc">Add positive (left click) and negative (right / Shift+Click) points to refine masks. Save each distinct object you want to edit later.</p>
-      <div class="seg-controls">
-        <button id="samUndoBtn" disabled title="Undo last point (U)">Undo</button>
-        <button id="samClearBtn" disabled title="Clear all points (Esc)">Clear</button>
-        <button id="samRefreshBtn" disabled title="Re-run segmentation">Re-Segment</button>
-        <span id="samPointSummary" class="point-summary" aria-live="polite"></span>
+    <!-- Step 2: Template Capture -->
+    <section class="panel workflow-step" id="stepTemplate" aria-labelledby="stepTemplateHeading" hidden>
+      <h2 id="stepTemplateHeading">Step 2 · Capture Templates</h2>
+      <p class="phase-desc">Select 1–3 reference images and add point prompts. Each saved template will be applied to all dataset images.</p>
+      <div class="template-controls">
+        <button id="templateAddBtn" disabled>Create New Template</button>
+        <span id="templateStatus" class="status" aria-live="polite"></span>
       </div>
       <div class="layout-grid">
         <div class="block">
-          <h3 class="block-title">Image & Points</h3>
-          <div class="preview-container" id="samPreviewContainer" aria-label="Image with points overlay">
-            <img id="samImg" alt="Uploaded image" />
-            <canvas id="samOverlay" aria-hidden="true"></canvas>
-            <canvas id="samPointsCanvas" aria-hidden="true"></canvas>
+          <h3 class="block-title">Reference Images</h3>
+          <div style="display:flex; gap:0.75rem; flex-wrap:wrap; align-items:flex-start;">
+            <div style="flex:1; min-width:180px;">
+              <h4 style="margin:0 0 .4rem; font-size:.6rem; text-transform:uppercase; letter-spacing:.5px; color:#8ea1af;">Fail Images</h4>
+              <div id="referenceGalleryFail" class="reference-gallery"></div>
+            </div>
+            <div style="flex:1; min-width:180px;">
+              <h4 style="margin:0 0 .4rem; font-size:.6rem; text-transform:uppercase; letter-spacing:.5px; color:#8ea1af;">Pass Images</h4>
+              <div id="referenceGalleryPass" class="reference-gallery"></div>
+            </div>
+          </div>
+          <div class="hint compact">Click an image in either group to add prompts for a new template. (Grouping inferred from filename containing 'fail' or 'pass').</div>
+        </div>
+        <div class="block" id="pointCaptureBlock" hidden>
+          <h3 class="block-title">Point Prompts</h3>
+          <div class="preview-container" id="templatePreviewContainer">
+            <img id="templateImg" alt="Template reference" />
+            <canvas id="templatePointsCanvas"></canvas>
+            <canvas id="templateMaskCanvas"></canvas>
             <div class="point-legend">Left: + | Right / Shift+Click: −</div>
           </div>
-        </div>
-        <div class="block">
-          <h3 class="block-title">Mask Candidates</h3>
-          <ul id="samCandidates" class="candidate-list" aria-label="Mask Candidates">
-            <li class="empty">Add points to see masks.</li>
-          </ul>
-          <div class="sam-save">
-            <input type="text" id="samComponentName" placeholder="Component name" aria-label="Component name" />
-            <button id="samSaveBtn" disabled>Save</button>
+          <div class="point-controls">
+            <input type="text" id="templateName" placeholder="Template name (optional)" />
+            <select id="templateClass" style="padding:0.45rem 0.5rem; background:#121518; border:1px solid #2a3138; border-radius:6px; color:#e6edf3; font-size:0.6rem;">
+              <option value="">No class (apply to all)</option> 
+              <option value="pass">Pass images only</option>
+              <option value="fail">Fail images only</option>
+            </select>
+            <button id="templateSaveBtn" disabled>Save Template</button>
+            <button id="templateClearBtn" disabled>Clear Points</button>
+            <button id="templatePreviewBtn" disabled>Preview Mask</button>
+            <span id="pointCount" class="point-summary"></span>
           </div>
-          <div class="hint compact">Save each region you plan to edit in Phase 3.</div>
         </div>
         <div class="block">
-          <h3 class="block-title">Saved Components</h3>
-          <div id="samSavedList" class="saved-components" aria-live="polite">None yet.</div>
+          <h3 class="block-title">Saved Templates</h3>
+          <div id="templateList" class="template-list"></div>
+          <button id="proceedToEditsBtn" class="primary btn-proceed" disabled>Continue to Edits →</button>
         </div>
-      </div>
-      <div class="phase-nav">
-        <button id="backToUpload" class="secondary">← Back</button>
-        <button id="toEditPhase" class="primary" disabled>Continue to Edits →</button>
       </div>
     </section>
 
-    <!-- Phase 3: Qualitative Editing -->
-    <section class="panel phase" id="phase3" data-phase="3" aria-labelledby="phase3Heading" hidden>
-      <h2 id="phase3Heading">Phase 3 · Qualitative Adjustments</h2>
-      <p class="phase-desc">Apply human‑friendly tweaks to each saved component. Values represent relative changes; small adjustments are often enough.</p>
-      <div class="layout-grid single-col">
+    <!-- Step 3: Edit Configuration & Generation -->
+    <section class="panel workflow-step" id="stepGenerate" aria-labelledby="stepGenerateHeading" hidden>
+      <h2 id="stepGenerateHeading">Step 3 · Configure Edits & Generate</h2>
+      <p class="phase-desc">Assign qualitative adjustments to each template, then stream-generate variants for all dataset images.</p>
+      <div id="templatePreviewSection" class="template-preview-section" style="margin-bottom:1rem; background:#181b1f; border:1px solid #252c33; border-radius:8px; padding:0.85rem;" hidden>
+        <h3 style="margin:0 0 0.7rem; font-size:0.75rem; color:#d2dae2;">Preview Template Result</h3>
+        <div style="display:flex; gap:0.8rem; align-items:center; margin-bottom:0.6rem; flex-wrap:wrap;">
+          <select id="previewClassFilter" style="padding:0.45rem 0.5rem; background:#121518; border:1px solid #2a3138; border-radius:6px; color:#e6edf3; font-size:0.6rem;">
+            <option value="pass">Pass Template Preview</option>
+            <option value="fail">Fail Template Preview</option>
+          </select>
+          <button id="previewTemplateBtn" style="font-size:0.65rem;">Generate Preview</button>
+          <span id="previewStatus" style="font-size:0.55rem; color:#8ea1af;"></span>
+        </div>
+        <div id="previewImageContainer" style="max-width:100%; max-height:400px; display:flex; justify-content:center; align-items:center; background:#0d0f11; border:1px solid #2b3239; border-radius:6px; min-height:200px;">
+          <img id="previewResultImg" style="max-width:100%; max-height:400px; object-fit:contain; display:none;" />
+          <span id="previewPlaceholder" style="color:#6b7680; font-size:0.6rem;">Select image class and click "Generate Preview" to see template result</span>
+        </div>
+      </div>
+      <div class="layout-grid">
         <div class="block">
-          <h3 class="block-title">Components</h3>
-          <div id="samComponentsPanel" class="sam-components-panel" aria-live="polite"></div>
-          <div id="samEditsList" class="edits-grid" aria-live="polite"></div>
-          <div class="qual-legend">
-            <ul>
-              <li><strong>Darker / Lighter</strong> → brightness (adds or subtracts light)</li>
-              <li><strong>Flatter / Punchier</strong> → contrast (compresses or expands tonal range)</li>
-              <li><strong>Lift Shadows / Deepen Shadows</strong> → gamma (perceived midtone shift)</li>
-              <li><strong>Vivid / Muted</strong> → saturation (color intensity)</li>
-              <li><strong>Rotate Hue</strong> → hue (cycle colors)</li>
-              <li><strong>Sharper / Softer</strong> → sharpen (edge emphasis)</li>
-              <li><strong>Texture</strong> → noise (adds subtle grain)</li>
-              <li><strong>Opacity</strong> → opacity (blend with original)</li>
-            </ul>
+          <h3 class="block-title">Templates & Edits</h3>
+          <div id="templateEditsList" class="template-edits-list"></div>
+        </div>
+        <div class="block stretch">
+          <h3 class="block-title">Generation</h3>
+          <div class="generate-actions">
+            <button id="generateBtn" disabled>Generate All Variants</button>
+            <span id="generateStatus" class="status" aria-live="polite"></span>
           </div>
-          <div class="result-block">
-            <h3 class="block-title">Preview Result</h3>
-            <img id="samEditedImg" alt="Edited output" class="result-img" />
-            <div class="sam-apply">
-              <button id="samApplyBtn" disabled>Apply All</button>
-              <button id="samDownloadBtn" disabled>Download</button>
-              <span id="samApplyStatus" class="status" aria-live="polite"></span>
-            </div>
+          <div id="generateResults" class="generate-results"></div>
+          <div class="batch-download-row">
+            <button id="downloadAllBtn" disabled>Download All as ZIP</button>
           </div>
         </div>
       </div>
       <div class="phase-nav">
-        <button id="backToSegment" class="secondary">← Back</button>
+        <button id="backToTemplates" class="secondary">← Back to Templates</button>
       </div>
     </section>
   </main>
   <footer>
-    <span>Keyboard: 1/2/3 pick candidate · U undo · Esc clear.</span>
+    <span>Dataset workflow · Templates define reusable segmentation + edit recipes</span>
   </footer>
+  
+  <!-- Generation Progress Modal -->
+  <div id="generationModal" class="generation-modal" hidden>
+    <div class="modal-backdrop"></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Generating Dataset Variants</h2>
+        <button id="modalMinimizeBtn" class="modal-minimize" title="Minimize - work in background">−</button>
+      </div>
+      <div class="modal-body">
+        <div class="progress-section">
+          <div class="progress-header">
+            <span class="progress-label">Processing Images</span>
+            <span class="progress-count" id="modalProgressCount">0 / 0</span>
+          </div>
+          <div class="progress-bar-container">
+            <div class="progress-bar" id="modalProgressBar"></div>
+            <div class="progress-shine"></div>
+          </div>
+          <div class="progress-percentage" id="modalProgressPercent">0%</div>
+        </div>
+        
+        <div class="status-section">
+          <div class="status-icon">
+            <svg class="spinner" viewBox="0 0 50 50">
+              <circle class="path" cx="25" cy="25" r="20" fill="none" stroke-width="5"></circle>
+            </svg>
+          </div>
+          <div class="status-text">
+            <div class="status-title" id="modalStatusTitle">Segmenting and applying edits...</div>
+            <div class="status-subtitle" id="modalStatusSubtitle">This may take a few moments</div>
+          </div>
+        </div>
+        
+        <div class="info-card">
+          <svg class="info-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <circle cx="12" cy="12" r="10" stroke-width="2"/>
+            <path d="M12 16v-4M12 8h.01" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          <div class="info-text">
+            <strong>Feel free to let us work in the background!</strong>
+            <p>You can minimize this window and continue browsing. We'll notify you when your new dataset is complete.</p>
+          </div>
+        </div>
+        
+        <div class="current-image-section" id="currentImageSection" hidden>
+          <div class="current-image-label">Currently processing:</div>
+          <div class="current-image-name" id="currentImageName">image.jpg</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="modalCancelBtn" class="modal-btn-secondary">Cancel Generation</button>
+      </div>
+    </div>
+  </div>
+  
+  <!-- Minimized Progress Indicator -->
+  <div id="minimizedProgress" class="minimized-progress" hidden>
+    <div class="minimized-content" id="minimizedProgressContent">
+      <div class="minimized-spinner"></div>
+      <span class="minimized-text">Generating: <span id="minimizedCount">0/0</span></span>
+      <button id="minimizedExpandBtn" class="minimized-expand">↑</button>
+    </div>
+  </div>
+  
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="script.js" type="module"></script>
 </body>
 </html>
