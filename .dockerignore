@@ -1,0 +1,31 @@
+# General
+.git
+.gitignore
+README.md
+.env*
+py/.venv
+**/__pycache__
+**/*.pyc
+node_modules
+server/node_modules
+npm-debug.log
+yarn.lock
+*.zip
+.tmp
+.DS_Store
+
+# Model artifacts (mount at runtime)
+models/
+py/models/
+
+# Temp / runtime outputs
+tmp_datasets/
+tmp/
+outputs/
+__outputs__/
+dist/
+
+# Large image/testing folders (add if present)
+data/
+datasets/
+samples/

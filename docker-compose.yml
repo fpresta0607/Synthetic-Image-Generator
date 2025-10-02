@@ -1,0 +1,68 @@
+version: '3.9'
+services:
+  sam-backend:
+    build:
+      context: .
+      target: backend
+    image: sam-backend:latest
+    environment:
+      FLASK_PORT: 5001
+      FLASK_HOST: 0.0.0.0
+      SAM_MODEL_TYPE: vit_b
+      WARM_MODEL: '1'
+    volumes:
+      - ./models:/models:ro
+      # Also mount models into the backend code directory so the default relative path 'models/sam_vit_b.pth' resolves
+      - ./models:/app/py/models:ro
+    ports:
+      - "5001:5001"
+
+  sam-node:
+    build:
+      context: .
+      target: node
+    image: sam-node:latest
+    environment:
+      PORT: 3000
+      PY_SERVICE_URL: http://sam-backend:5001
+      AWS_REGION: us-east-1
+      DATASETS_BUCKET: local-datasets
+      OUTPUTS_BUCKET: local-outputs
+      JOBS_TABLE: sam_jobs
+      JOBS_QUEUE_URL: http://localstack:4566/000000000000/sam-jobs
+      API_KEY: dev-key
+    depends_on:
+      - sam-backend
+    ports:
+      - "3000:3000"
+
+  sam-worker:
+    build:
+      context: .
+      target: worker
+    image: sam-worker:latest
+    environment:
+      AWS_REGION: us-east-1
+      DATASETS_BUCKET: local-datasets
+      OUTPUTS_BUCKET: local-outputs
+      MODELS_BUCKET: local-models
+      JOBS_TABLE: sam_jobs
+      JOBS_QUEUE_URL: http://localstack:4566/000000000000/sam-jobs
+      SAM_CHECKPOINT: /models/sam_vit_b.pth
+    volumes:
+      - ./models:/models:ro
+    depends_on:
+      - localstack
+
+  localstack:
+    image: localstack/localstack:2.3
+    environment:
+      SERVICES: s3,sqs,dynamodb
+      DEFAULT_REGION: us-east-1
+    ports:
+      - "4566:4566"
+    volumes:
+      - "localstack-data:/var/lib/localstack"
+
+volumes:
+  localstack-data:

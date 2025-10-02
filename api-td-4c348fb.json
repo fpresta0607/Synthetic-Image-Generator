@@ -1,0 +1,66 @@
+{
+    "family":  "sam-api",
+    "networkMode":  "awsvpc",
+    "cpu":  "1024",
+    "memory":  "2048",
+    "requiresCompatibilities":  [
+                                    "FARGATE"
+                                ],
+    "executionRoleArn":  "arn:aws:iam::401753844565:role/ecsTaskExecutionRole",
+    "taskRoleArn":  "arn:aws:iam::401753844565:role/samTaskRole",
+    "containerDefinitions":  [
+                                 {
+                                     "name":  "api",
+                                     "image":  "401753844565.dkr.ecr.us-east-1.amazonaws.com/sam-api:4c348fb",
+                                     "essential":  true,
+                                     "portMappings":  [
+                                                          {
+                                                              "containerPort":  3000,
+                                                              "protocol":  "tcp"
+                                                          }
+                                                      ],
+                                     "environment":  [
+                                                         {
+                                                             "name":  "AWS_REGION",
+                                                             "value":  "us-east-1"
+                                                         },
+                                                         {
+                                                             "name":  "DATASETS_BUCKET",
+                                                             "value":  "sam-datasets-prod-401753844565"
+                                                         },
+                                                         {
+                                                             "name":  "OUTPUTS_BUCKET",
+                                                             "value":  "sam-outputs-prod-401753844565"
+                                                         },
+                                                         {
+                                                             "name":  "MODELS_BUCKET",
+                                                             "value":  "sam-models-prod-401753844565"
+                                                         },
+                                                         {
+                                                             "name":  "JOBS_TABLE",
+                                                             "value":  "sam_jobs"
+                                                         },
+                                                         {
+                                                             "name":  "JOBS_QUEUE_URL",
+                                                             "value":  "https://sqs.us-east-1.amazonaws.com/401753844565/sam-jobs"
+                                                         },
+                                                         {
+                                                             "name":  "API_KEY",
+                                                             "value":  "CHANGE_ME_SOON"
+                                                         },
+                                                         {
+                                                             "name":  "WARM_MODEL",
+                                                             "value":  "1"
+                                                         }
+                                                     ],
+                                     "logConfiguration":  {
+                                                              "logDriver":  "awslogs",
+                                                              "options":  {
+                                                                              "awslogs-group":  "/ecs/sam-api",
+                                                                              "awslogs-region":  "us-east-1",
+                                                                              "awslogs-stream-prefix":  "ecs"
+                                                                          }
+                                                          }
+                                 }
+                             ]
+}

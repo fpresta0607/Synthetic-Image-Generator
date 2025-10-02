@@ -62,8 +62,13 @@ _SAM_MODEL_ID: Optional[str] = None
 _DATASETS: Dict[str, Dict[str, Any]] = {}
 
 def _get_default_model_type():
-    """Get default model type based on loaded SAM package."""
-    return 'vit_tiny' if _USING_HQ_SAM else 'vit_t'
+    """Get default model type based on loaded SAM package.
+
+    For HQ-SAM we prefer the tiny variant for speed.
+    For upstream (regular) SAM the smallest officially distributed weight is ViT-B.
+    (There is no canonical 'vit_t' in the original Meta SAM checkpoints.)
+    """
+    return 'vit_tiny' if _USING_HQ_SAM else 'vit_b'
 
 # ---------------------------------------------------------------------------
 # SAM Embedding Cache (Performance optimization: 3-5x speedup)
@@ -97,6 +102,66 @@ def _ensure_datasets_dir() -> str:
     if not os.path.exists(path):
         os.makedirs(path, exist_ok=True)
     return path
+
+def _hydrate_dataset_from_s3(ds_id: str) -> bool:
+    """Attempt to lazily hydrate an in-memory dataset from S3 when running in ECS.
+
+    This enables preview / template operations in a stateless API container where a previous
+    /sam/dataset/init multipart upload has not occurred (images were uploaded directly to S3).
+
+    Expected S3 layout: s3://<DATASETS_BUCKET>/datasets/<dataset_id>/filename.jpg
+    Only image files (jpg/jpeg/png/webp/bmp) are considered. Thumbnails generated similarly to
+    regular dataset init. Capped at MAX_IMAGES_PER_DATASET to limit memory usage.
+    Returns True on success; False if hydration not possible or no images found.
+    """
+    if ds_id in _DATASETS:
+        return True
+    bucket = os.environ.get('DATASETS_BUCKET')
+    if not bucket:
+        return False
+    prefix = f"datasets/{ds_id}/"
+    try:
+        import boto3  # type: ignore
+        s3 = boto3.client('s3', region_name=os.environ.get('AWS_REGION','us-east-1'))
+    except Exception as e:  # boto3 not present or AWS creds missing
+        print(f"[hydrate] boto3 unavailable: {e}")
+        return False
+    try:
+        resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+        contents = resp.get('Contents', [])
+        image_keys = [o['Key'] for o in contents if o['Key'].lower().endswith(('.jpg','.jpeg','.png','.webp','.bmp'))]
+        if not image_keys:
+            print(f"[hydrate] no image objects under s3://{bucket}/{prefix}")
+            return False
+        # Create local dataset dir
+        root = _ensure_datasets_dir()
+        ds_dir = os.path.join(root, ds_id)
+        os.makedirs(ds_dir, exist_ok=True)
+        images_meta: List[Dict[str, Any]] = []
+        for key in image_keys[:MAX_IMAGES_PER_DATASET]:
+            fname = os.path.basename(key)
+            local_path = os.path.join(ds_dir, fname)
+            try:
+                s3.download_file(bucket, key, local_path)
+                # Build thumb
+                try:
+                    img = Image.open(local_path).convert('RGB')
+                    img.thumbnail((192,192))
+                    buf = io.BytesIO(); img.save(buf, format='JPEG', quality=70)
+                    thumb_b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+                except Exception:
+                    thumb_b64 = ''
+                images_meta.append({'id': uuid.uuid4().hex, 'filename': fname, 'path': local_path, 'thumb_b64': thumb_b64})
+            except Exception as e:
+                print(f"[hydrate] failed to download {key}: {e}")
+        if not images_meta:
+            return False
+        _DATASETS[ds_id] = {'images': images_meta, 'templates': {}, 'created_at': time.time()}
+        print(f"[hydrate] hydrated dataset '{ds_id}' with {len(images_meta)} images from S3")
+        return True
+    except Exception as e:
+        print(f"[hydrate] error listing/downloading: {e}")
+        return False
 
 def _maybe_cleanup_datasets():
     """Remove dataset dirs older than DATASET_TTL_HOURS (runs periodically)."""
@@ -211,28 +276,49 @@ def _load_sam_model(model_type: Optional[str] = None, checkpoint_path: Optional[
     if model_type is None:
         model_type = _get_default_model_type()
     model_type = os.environ.get('SAM_MODEL_TYPE', model_type)
+
+    # Validate requested model type against registry; fallback gracefully if not found
+    try:
+        registry_keys = list(sam_model_registry.keys())  # type: ignore[attr-defined]
+    except Exception:
+        registry_keys = []
+    if registry_keys and model_type not in registry_keys:
+        # Provide a prioritized fallback chain
+        for candidate in ('vit_tiny', 'vit_t', 'vit_b', 'vit_l', 'vit_h'):
+            if candidate in registry_keys:
+                print(f"[SAM] Requested model_type '{model_type}' not in registry; falling back to '{candidate}'. Available: {registry_keys}")
+                model_type = candidate
+                break
+        else:  # No candidate matched
+            print(f"[SAM] No supported model types found in registry: {registry_keys}")
+            return False
     env_ckpt = os.environ.get('SAM_CHECKPOINT')
     
     # Default checkpoint paths - prioritize HQ-SAM if using HQ-SAM package
     if _USING_HQ_SAM:
         default_paths = {
-            'vit_t': 'models/sam_hq_vit_tiny.pth',
             'vit_tiny': 'models/sam_hq_vit_tiny.pth',
+            'vit_t': 'models/sam_hq_vit_tiny.pth',  # alias to tiny
             'vit_b': 'models/sam_hq_vit_b.pth',
             'vit_h': 'models/sam_hq_vit_h.pth'
         }
     else:
+        # Upstream official checkpoints: vit_b / vit_l / vit_h
         default_paths = {
-            'vit_t': 'models/sam_vit_t.pth',
             'vit_b': 'models/sam_vit_b.pth',
-            'vit_h': 'models/sam_vit_h.pth'
+            'vit_l': 'models/sam_vit_l.pth',
+            'vit_h': 'models/sam_vit_h.pth',
+            # Map aliases to closest available
+            'vit_t': 'models/sam_vit_b.pth',
+            'vit_tiny': 'models/sam_vit_b.pth'
         }
-    checkpoint_path = env_ckpt or checkpoint_path or default_paths.get(model_type, default_paths.get('vit_t', 'models/sam_vit_t.pth'))
-    if checkpoint_path is None:
+    checkpoint_path = env_ckpt or checkpoint_path or default_paths.get(model_type) or next(iter(default_paths.values()))
+    if checkpoint_path is None:  # defensive
+        print('[SAM] No checkpoint path resolved')
         return False
     
     # If the provided checkpoint doesn't exist, try glob fallbacks
-    if not os.path.exists(checkpoint_path):  # type: ignore[arg-type]
+    if not os.path.exists(str(checkpoint_path)):
         # Try model-specific patterns first (prioritize HQ-SAM)
         patterns = [
             f'models/sam_hq_{model_type}*.pth',  # HQ-SAM specific
@@ -250,18 +336,44 @@ def _load_sam_model(model_type: Optional[str] = None, checkpoint_path: Optional[
         if candidates:
             checkpoint_path = candidates[0]
             # Extract model type from filename
-            fname = os.path.basename(checkpoint_path)
+            fname = os.path.basename(str(checkpoint_path))
             if 'vit_h' in fname:
                 model_type = 'vit_h'
             elif 'vit_b' in fname:
                 model_type = 'vit_b'
             elif 'vit_t' in fname or 'tiny' in fname:
                 model_type = 'vit_tiny' if _USING_HQ_SAM else 'vit_t'
-    if not os.path.exists(checkpoint_path):
+    if not os.path.exists(str(checkpoint_path)):
         print(f"[SAM] Checkpoint not found at '{checkpoint_path}'. Set SAM_CHECKPOINT env var or place file at models/sam_vit_b.pth")
         return False
     try:
-        sam = sam_model_registry[model_type](checkpoint=checkpoint_path)  # type: ignore[index]
+        if model_type not in sam_model_registry:  # type: ignore[operator]
+            print(f"[SAM] Model type '{model_type}' absent at load time, retrying fallback logic.")
+            for candidate in ('vit_tiny','vit_b','vit_l','vit_h','default'):
+                if candidate in sam_model_registry:  # type: ignore[operator]
+                    model_type = candidate
+                    checkpoint_path = default_paths.get(candidate, checkpoint_path)
+                    print(f"[SAM] Falling back to '{model_type}'")
+                    break
+        # Primary load path
+        try:
+            sam = sam_model_registry[model_type](checkpoint=checkpoint_path)  # type: ignore[index]
+        except Exception as primary_e:
+            # CPU fallback if checkpoint serialized from CUDA context
+            msg = str(primary_e)
+            if 'torch.cuda.is_available() is False' in msg or 'Attempting to deserialize object on a CUDA device' in msg:
+                print('[SAM] Detected CUDA serialization in checkpoint; forcing CPU map_location load fallback')
+                import torch as _torch  # local import
+                state_dict = _torch.load(checkpoint_path, map_location='cpu')  # type: ignore[arg-type]
+                # Build empty model then load state dict
+                sam = sam_model_registry[model_type]()  # type: ignore[index]
+                missing, unexpected = sam.load_state_dict(state_dict, strict=False)
+                if missing:
+                    print(f"[SAM] Warning: missing keys during fallback load: {missing[:5]}{'...' if len(missing)>5 else ''}")
+                if unexpected:
+                    print(f"[SAM] Warning: unexpected keys during fallback load: {unexpected[:5]}{'...' if len(unexpected)>5 else ''}")
+            else:
+                raise
         device = 'cuda' if (torch and torch.cuda.is_available()) else 'cpu'
         sam.to(device)
         if device == 'cuda' and SAM_FP16:
@@ -912,7 +1024,11 @@ def dataset_init():
 @app.route('/sam/dataset/template/save', methods=['POST'])
 def dataset_template_save():
     data = request.get_json(force=True, silent=True) or {}
-    ds = _DATASETS.get(data.get('dataset_id',''))
+    ds_id = data.get('dataset_id','')
+    ds = _DATASETS.get(ds_id)
+    if not ds and ds_id:
+        _hydrate_dataset_from_s3(ds_id)
+        ds = _DATASETS.get(ds_id)
     if not ds: return {'error':'dataset_not_found'}, 404
     pts = data.get('points', [])
     if not pts: return {'error':'no_points'}, 400
@@ -932,6 +1048,9 @@ def dataset_template_save():
 def dataset_templates():
     ds_id = request.args.get('dataset_id','')
     ds = _DATASETS.get(ds_id)
+    if not ds and ds_id:
+        _hydrate_dataset_from_s3(ds_id)
+        ds = _DATASETS.get(ds_id)
     if not ds: return {'error':'dataset_not_found'}, 404
     return {'templates': [{'id':t['id'],'name':t['name'],'class':t.get('class',''),'points_count':len(t['points'])} for t in ds['templates'].values()]}
 
@@ -947,6 +1066,9 @@ def dataset_point_preview():
         return {'error':'dataset_id, image_id, and points required'}, 400
     
     ds = _DATASETS.get(ds_id)
+    if not ds and ds_id:
+        _hydrate_dataset_from_s3(ds_id)
+        ds = _DATASETS.get(ds_id)
     if not ds: return {'error':'dataset_not_found'}, 404
     
     if _SAM_PREDICTOR is None and not _load_sam_model('vit_b'):
@@ -1002,6 +1124,9 @@ def dataset_template_preview():
     ds_id = data.get('dataset_id')
     if not ds_id: return {'error':'dataset_id_required'}, 400
     ds = _DATASETS.get(ds_id)
+    if not ds and ds_id:
+        _hydrate_dataset_from_s3(ds_id)
+        ds = _DATASETS.get(ds_id)
     if not ds: return {'error':'dataset_not_found'}, 404
     if not ds['templates']: return {'error':'no_templates'}, 400
     if _SAM_PREDICTOR is None and not _load_sam_model('vit_b'):
@@ -1168,6 +1293,43 @@ def dataset_apply_stream():
 if __name__ == '__main__':
     # Production-friendly startup: attempt early model load & optional precompute warm (without blocking long)
     warm = os.environ.get('WARM_MODEL', '1') == '1'
+    # Optional: fetch model checkpoint from S3 if a MODELS_BUCKET is provided and the file is missing.
+    def _maybe_fetch_model_from_s3():  # lightweight and non-fatal
+        bucket = os.environ.get('MODELS_BUCKET')
+        if not bucket:
+            return
+        target_path = os.environ.get('SAM_CHECKPOINT') or 'models/sam_vit_b.pth'
+        if os.path.exists(target_path):
+            return
+        try:
+            import boto3  # type: ignore
+            from botocore.exceptions import ClientError  # type: ignore
+        except Exception:
+            print('[startup] boto3 not available; skipping S3 model fetch')
+            return
+        region = os.environ.get('AWS_REGION', 'us-east-1')
+        s3 = boto3.client('s3', region_name=region)
+        # Allow override of the object key via SAM_CHECKPOINT_KEY env
+        explicit_key = os.environ.get('SAM_CHECKPOINT_KEY')
+        candidate_keys = [k for k in [explicit_key, 'sam_vit_b.pth', 'sam_hq_vit_tiny.pth', 'sam_hq_vit_b.pth'] if k]
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        for key in candidate_keys:
+            try:
+                print(f"[startup] attempting to download model '{key}' from s3://{bucket} -> {target_path}")
+                s3.download_file(bucket, key, target_path)
+                print(f"[startup] downloaded model checkpoint '{key}'")
+                break
+            except ClientError as e:
+                code = getattr(e, 'response', {}).get('Error', {}).get('Code')
+                if code in ('404', 'NoSuchKey', 'NotFound'):
+                    continue
+                print(f"[startup] S3 download error for key {key}: {e}")
+            except Exception as e:  # pragma: no cover
+                print(f"[startup] unexpected error fetching model: {e}")
+        else:
+            print('[startup] no model downloaded; SAM endpoints may return model_not_loaded until checkpoint is provided')
+
+    _maybe_fetch_model_from_s3()
     if warm:
         _load_sam_model()
     use_waitress = True
