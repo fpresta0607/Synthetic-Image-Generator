@@ -1,0 +1,33 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-east-1   # <-- change if needed
+
+phases:
+  pre_build:
+    commands:
+      - set -e
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_URI=$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - echo "Logging in to ECR $ECR_URI"
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_URI
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      # make sure repos exist (idempotent)
+      - aws ecr describe-repositories --repository-names ui     || aws ecr create-repository --repository-name ui
+      - aws ecr describe-repositories --repository-names sam    || aws ecr create-repository --repository-name sam
+  build:
+    commands:
+      - echo "Building UI image..."
+      - docker build -t $ECR_URI/ui:$COMMIT_HASH -f server/Dockerfile server
+      - echo "Building SAM backend image..."
+      - docker build -t $ECR_URI/sam:$COMMIT_HASH -f py/Dockerfile py
+  post_build:
+    commands:
+      - docker push $ECR_URI/ui:$COMMIT_HASH
+      - docker push $ECR_URI/sam:$COMMIT_HASH
+      # one image-definitions file that updates *both* containers in the same ECS task
+      - printf '[{"name":"ui","imageUri":"%s"},{"name":"sam","imageUri":"%s"}]' "$ECR_URI/ui:$COMMIT_HASH" "$ECR_URI/sam:$COMMIT_HASH" > imagedefinitions.json
+artifacts:
+  files:
+    - imagedefinitions.json
