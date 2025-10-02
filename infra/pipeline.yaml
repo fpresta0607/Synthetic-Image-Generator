@@ -37,6 +37,27 @@ Parameters:
   HealthCheckPath:
     Type: String
     Default: /api/backend/health
+  DatasetsBucketName:
+    Type: String
+    Description: Name of S3 bucket storing dataset images
+  OutputsBucketName:
+    Type: String
+    Description: Name of S3 bucket storing generated outputs
+  ModelsBucketName:
+    Type: String
+    Description: Name of S3 bucket storing model checkpoints (optional if baked in image)
+  JobsQueueArn:
+    Type: String
+    Description: ARN of SQS queue for jobs worker (if used)
+  JobsQueueUrl:
+    Type: String
+    Description: URL of SQS queue for jobs worker (passed to container)
+  JobsTableArn:
+    Type: String
+    Description: ARN of DynamoDB jobs table
+  JobsTableName:
+    Type: String
+    Description: Name of DynamoDB jobs table (for environment variable)
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -47,6 +68,8 @@ Metadata:
         Parameters: [VpcId, PublicSubnets, ListenerArn]
       - Label: { default: Service } 
         Parameters: [ProjectName, ContainerCPU, ContainerMemory, DesiredCount, ContainerPort, HealthCheckPath]
+      - Label: { default: Data Stores }
+        Parameters: [DatasetsBucketName, OutputsBucketName, ModelsBucketName, JobsQueueArn, JobsQueueUrl, JobsTableArn, JobsTableName]
 
 Resources:
   EcrRepository:
@@ -97,21 +120,27 @@ Resources:
                   - s3:GetObject
                   - s3:PutObject
                   - s3:ListBucket
-                Resource: '*'
+                Resource:
+                  - !Sub arn:aws:s3:::${DatasetsBucketName}
+                  - !Sub arn:aws:s3:::${DatasetsBucketName}/*
+                  - !Sub arn:aws:s3:::${OutputsBucketName}
+                  - !Sub arn:aws:s3:::${OutputsBucketName}/*
+                  - !Sub arn:aws:s3:::${ModelsBucketName}
+                  - !Sub arn:aws:s3:::${ModelsBucketName}/*
               - Effect: Allow
                 Action:
                   - sqs:ReceiveMessage
                   - sqs:DeleteMessage
                   - sqs:GetQueueAttributes
                   - sqs:SendMessage
-                Resource: '*'
+                Resource: !Ref JobsQueueArn
               - Effect: Allow
                 Action:
                   - dynamodb:PutItem
                   - dynamodb:UpdateItem
                   - dynamodb:GetItem
                   - dynamodb:DescribeTable
-                Resource: '*'
+                Resource: !Ref JobsTableArn
 
   Cluster:
     Type: AWS::ECS::Cluster
@@ -171,6 +200,16 @@ Resources:
               Value: http://127.0.0.1:5001
             - Name: WARM_MODEL
               Value: "1"
+            - Name: DATASETS_BUCKET
+              Value: !Ref DatasetsBucketName
+            - Name: OUTPUTS_BUCKET
+              Value: !Ref OutputsBucketName
+            - Name: MODELS_BUCKET
+              Value: !Ref ModelsBucketName
+            - Name: JOBS_QUEUE_URL
+              Value: !Ref JobsQueueUrl
+            - Name: JOBS_TABLE
+              Value: !Ref JobsTableName
           LogConfiguration:
             LogDriver: awslogs
             Options:
