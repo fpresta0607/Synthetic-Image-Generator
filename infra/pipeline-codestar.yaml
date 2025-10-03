@@ -148,17 +148,28 @@ Resources:
         - Name: api
           Image: !Sub ${EcrRepository.RepositoryUri}:latest
           Essential: true
-          PortMappings: [{ ContainerPort: !Ref ContainerPort, Protocol: tcp }]
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
           Environment:
-            - { Name: FLASK_PORT, Value: "5001" }
-            - { Name: PY_SERVICE_URL, Value: http://127.0.0.1:5001 }
-            - { Name: WARM_MODEL, Value: "1" }
-            - { Name: DATASETS_BUCKET, Value: !Ref DatasetsBucketName }
-            - { Name: OUTPUTS_BUCKET, Value: !Ref OutputsBucketName }
-            - { Name: MODELS_BUCKET, Value: !Ref ModelsBucketName }
-            - { Name: SAM_CHECKPOINT_KEY, Value: !Ref SamCheckpointKey }
-            - { Name: JOBS_QUEUE_URL, Value: !Ref JobsQueueUrl }
-            - { Name: JOBS_TABLE, Value: !Ref JobsTableName }
+            - Name: FLASK_PORT
+              Value: "5001"
+            - Name: PY_SERVICE_URL
+              Value: http://127.0.0.1:5001
+            - Name: WARM_MODEL
+              Value: "1"
+            - Name: DATASETS_BUCKET
+              Value: !Ref DatasetsBucketName
+            - Name: OUTPUTS_BUCKET
+              Value: !Ref OutputsBucketName
+            - Name: MODELS_BUCKET
+              Value: !Ref ModelsBucketName
+            - Name: SAM_CHECKPOINT_KEY
+              Value: !Ref SamCheckpointKey
+            - Name: JOBS_QUEUE_URL
+              Value: !Ref JobsQueueUrl
+            - Name: JOBS_TABLE
+              Value: !Ref JobsTableName
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -219,18 +230,24 @@ Resources:
     Properties:
       Name: !Sub ${ProjectName}-build
       ServiceRole: !GetAtt CodeBuildRole.Arn
-      Artifacts: { Type: CODEPIPELINE }
+      Artifacts:
+        Type: CODEPIPELINE
       Environment:
         ComputeType: BUILD_GENERAL1_MEDIUM
         Image: aws/codebuild/standard:7.0
         Type: LINUX_CONTAINER
         PrivilegedMode: true
         EnvironmentVariables:
-          - { Name: REPOSITORY_URI, Value: !GetAtt EcrRepository.RepositoryUri }
-          - { Name: TASK_DEFINITION_FAMILY, Value: !Sub ${ProjectName}-api }
-          - { Name: CLUSTER_NAME, Value: !Ref Cluster }
-          - { Name: SERVICE_NAME, Value: !Sub ${ProjectName}-api }
-      Source: { Type: CODEPIPELINE }
+          - Name: REPOSITORY_URI
+            Value: !GetAtt EcrRepository.RepositoryUri
+          - Name: TASK_DEFINITION_FAMILY
+            Value: !Sub ${ProjectName}-api
+          - Name: CLUSTER_NAME
+            Value: !Ref Cluster
+          - Name: SERVICE_NAME
+            Value: !Sub ${ProjectName}-api
+      Source:
+        Type: CODEPIPELINE
       TimeoutInMinutes: 30
   PipelineRole:
     Type: AWS::IAM::Role
@@ -260,13 +277,20 @@ Resources:
     Properties:
       Name: !Sub ${ProjectName}-pipeline
       RoleArn: !GetAtt PipelineRole.Arn
-      ArtifactStore: { Type: S3, Location: !Ref ArtifactBucket }
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
       Stages:
         - Name: Source
           Actions:
             - Name: GitHubSource
-              ActionTypeId: { Category: Source, Owner: AWS, Provider: CodeStarSourceConnection, Version: '1' }
-              OutputArtifacts: [{ Name: SourceOutput }]
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              OutputArtifacts:
+                - Name: SourceOutput
               Configuration:
                 ConnectionArn: !Ref ConnectionArn
                 FullRepositoryId: !Sub ${GitHubOwner}/${GitHubRepo}
@@ -275,21 +299,37 @@ Resources:
         - Name: Build
           Actions:
             - Name: ContainerBuild
-              ActionTypeId: { Category: Build, Owner: AWS, Provider: CodeBuild, Version: '1' }
-              InputArtifacts: [{ Name: SourceOutput }]
-              OutputArtifacts: [{ Name: BuildOutput }]
-              Configuration: { ProjectName: !Ref CodeBuildProject }
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
         - Name: Deploy
           Actions:
             - Name: ECSDeploy
-              ActionTypeId: { Category: Deploy, Owner: AWS, Provider: ECS, Version: '1' }
-              InputArtifacts: [{ Name: BuildOutput }]
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: ECS
+                Version: '1'
+              InputArtifacts:
+                - Name: BuildOutput
               Configuration:
                 ClusterName: !Ref Cluster
                 ServiceName: !Sub ${ProjectName}-api
                 FileName: imagedefinitions.json
 Outputs:
-  RepositoryUri: { Value: !GetAtt EcrRepository.RepositoryUri }
-  ClusterName: { Value: !Ref Cluster }
-  ServiceName: { Value: !Sub ${ProjectName}-api }
-  PipelineName: { Value: !Ref Pipeline }
+  RepositoryUri:
+    Value: !GetAtt EcrRepository.RepositoryUri
+  ClusterName:
+    Value: !Ref Cluster
+  ServiceName:
+    Value: !Sub ${ProjectName}-api
+  PipelineName:
+    Value: !Ref Pipeline
