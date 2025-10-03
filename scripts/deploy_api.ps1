@@ -27,7 +27,8 @@ param(
   [string]$Cluster = "sam-cluster",
   [string]$Service = "sam-api-svc",
   [string]$Repo = "sam-api",
-  [string]$TaskDefFile = "api-td.json",
+  [string]$TaskDefFile = "api-td.json",  # optional: if absent we clone existing registered task def (family inferred from Service)
+  [string]$TaskFamily = "sam-api",       # family name (used when cloning existing definition)
   [string]$AlbDns,  # optional, if provided will curl /health at the end
   [switch]$EnableProxyDebug,
   [switch]$NoCache
@@ -38,7 +39,34 @@ $ErrorActionPreference = 'Stop'
 
 Write-Host "[deploy] Starting API deployment pipeline..." -ForegroundColor Cyan
 
-if (!(Test-Path $TaskDefFile)) { throw "Task definition file '$TaskDefFile' not found" }
+# Acquire / synthesize task definition JSON (either from file or by cloning existing family)
+$usingTempClone = $false
+if (Test-Path $TaskDefFile) {
+  Write-Host "[deploy] Using provided task definition file '$TaskDefFile'" -ForegroundColor DarkCyan
+} else {
+  Write-Host "[deploy] Local task def file not found. Attempting to clone existing family '$TaskFamily' from ECS" -ForegroundColor DarkYellow
+  try {
+    $raw = aws ecs describe-task-definition --task-definition $TaskFamily --region $Region | ConvertFrom-Json
+  } catch {
+    throw "Could not describe existing task definition family '$TaskFamily'. Provide -TaskDefFile or register one manually first. Error: $_"
+  }
+  $td = $raw.taskDefinition | ConvertTo-Json -Depth 50 | ConvertFrom-Json  # dup object
+  # Remove read-only / server-populated properties
+  $null = $td.PSObject.Properties.Remove('registeredAt')
+  $null = $td.PSObject.Properties.Remove('deregisteredAt')
+  $null = $td.PSObject.Properties.Remove('taskDefinitionArn')
+  $null = $td.PSObject.Properties.Remove('revision')
+  $null = $td.PSObject.Properties.Remove('status')
+  $null = $td.PSObject.Properties.Remove('requiresAttributes')
+  $null = $td.PSObject.Properties.Remove('compatibilities')
+  $null = $td.PSObject.Properties.Remove('registeredBy')
+  # Write to a temp file to re-use existing pipeline logic
+  $TaskDefFile = "_cloned-${TaskFamily}-base.json"
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [IO.File]::WriteAllText($TaskDefFile, ($td | ConvertTo-Json -Depth 50), $utf8NoBom)
+  $usingTempClone = $true
+  Write-Host "[deploy] Cloned current task def to $TaskDefFile" -ForegroundColor DarkCyan
+}
 
 # Acquire account id
 Write-Host "[deploy] Fetching AWS account id" -ForegroundColor DarkCyan
@@ -72,12 +100,16 @@ $buildArgs = @('--platform','linux/amd64','--target','full','-t',"${RepoUri}:lat
 if ($NoCache) { $buildArgs = @('--no-cache') + $buildArgs }
 docker buildx build @buildArgs
 
-# Prepare new task definition JSON
+<#
+ Prepare new task definition revision by loading JSON (original or cloned), updating image & optional env.
+#>
 Write-Host "[deploy] Preparing new task definition revision" -ForegroundColor DarkCyan
 $jsonObj = Get-Content $TaskDefFile -Raw | ConvertFrom-Json
+if (-not $jsonObj.containerDefinitions -or $jsonObj.containerDefinitions.Count -lt 1) { throw 'Container definitions missing in task definition JSON' }
 $jsonObj.containerDefinitions[0].image = "${RepoUri}:$ImmutableTag"
 if ($EnableProxyDebug) {
   $envList = $jsonObj.containerDefinitions[0].environment
+  if (-not $envList) { $envList = @() }
   if (-not ($envList | Where-Object { $_.name -eq 'PROXY_DEBUG' })) {
     $envList += [pscustomobject]@{ name = 'PROXY_DEBUG'; value = '1' }
   } else {
@@ -88,7 +120,7 @@ if ($EnableProxyDebug) {
 
 $outPath = "api-td-$ImmutableTag.json"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[IO.File]::WriteAllText($outPath, ($jsonObj | ConvertTo-Json -Depth 15), $utf8NoBom)
+[IO.File]::WriteAllText($outPath, ($jsonObj | ConvertTo-Json -Depth 50), $utf8NoBom)
 
 Write-Host "[deploy] Registering task definition from $outPath" -ForegroundColor DarkCyan
 $register = aws ecs register-task-definition --cli-input-json file://$outPath --region $Region | ConvertFrom-Json
@@ -117,6 +149,11 @@ if ($AlbDns) {
     $health = Invoke-RestMethod -Uri "http://$AlbDns/health" -TimeoutSec 10
     Write-Host "[deploy] Health: $(($health | ConvertTo-Json -Depth 5))" -ForegroundColor Green
   } catch { Write-Warning "Health probe failed: $_" }
+}
+
+if ($usingTempClone -and (Test-Path $TaskDefFile)) {
+  Remove-Item $TaskDefFile -Force -ErrorAction SilentlyContinue | Out-Null
+  Write-Host "[deploy] Cleaned up temporary cloned task definition file" -ForegroundColor DarkGray
 }
 
 Write-Host "[deploy] Done. New revision: sam-api:$newRevision (image tag $ImmutableTag)" -ForegroundColor Green

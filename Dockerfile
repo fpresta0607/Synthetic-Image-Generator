@@ -1,3 +1,4 @@
+## syntax=docker/dockerfile:1.6
 # Multi-stage build for SAM Bulk Dataset Generator
 # Targets:
 #  - backend: Python Flask + SAM
@@ -21,8 +22,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY py/requirements-sam.txt py/requirements.txt ./py/
 
-# Install Python deps first for caching
-RUN pip install --no-cache-dir -r py/requirements-sam.txt
+# Harden pip installation + enable pip cache mount (accelerates rebuilds)
+ENV PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=5
+
+# Install Python deps first (cached until requirements change)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --upgrade pip==24.2 setuptools wheel && \
+    pip install -r py/requirements-sam.txt
 
 # Copy application code
 COPY py /app/py
@@ -39,9 +46,8 @@ EXPOSE 5001
 # Backend runnable image
 ############################
 FROM python-base AS backend
-# Default command runs the backend (waitress optional). We keep simple gunicorn for portability.
-# Note: For CPU-only installations gunicorn worker count 1 is sufficient.
-RUN pip install --no-cache-dir gunicorn waitress
+# Install runtime server libs (cached)
+RUN --mount=type=cache,target=/root/.cache/pip pip install gunicorn waitress
 WORKDIR /app/py
 # Entrypoint: prefer app bootstrap (includes warm logic); fallback to gunicorn if env USE_GUNICORN=1
 COPY py/app.py /app/py/app.py
@@ -52,10 +58,11 @@ ENTRYPOINT ["bash","-c","if [ \"$USE_GUNICORN\" = '1' ]; then gunicorn -w ${GUNI
 ############################
 FROM node:20-slim AS node
 WORKDIR /app/server
-# Copy full source (simplifies since lock file not yet updated with new AWS deps)
+# Copy manifests first for dependency layer caching
+COPY server/package*.json ./
+RUN --mount=type=cache,target=/root/.npm npm install --omit=dev --no-audit --no-fund
+# Then copy remaining server code
 COPY server /app/server
-# Production install without dev deps; tolerate missing lock sync
-RUN npm install --omit=dev --no-audit --no-fund
 ENV PORT=3000 PY_SERVICE_URL=http://localhost:5001
 EXPOSE 3000
 CMD ["node","server.js"]
@@ -66,6 +73,7 @@ CMD ["node","server.js"]
 FROM python-base AS full
 # Install node (using apt) for simplicity
 RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/root/.cache/pip pip install gunicorn waitress
 WORKDIR /app
 COPY --from=node /app/server /app/server
 RUN cd server && npm install --production --no-audit --no-fund
@@ -82,7 +90,7 @@ ENTRYPOINT ["/entrypoint-full.sh"]
 ############################
 FROM python-base AS worker
 # boto3 + requests for S3/SQS/DDB + internal calls
-RUN pip install --no-cache-dir boto3 requests
+RUN --mount=type=cache,target=/root/.cache/pip pip install boto3 requests
 COPY py/worker /app/py/worker
 WORKDIR /app/py/worker
 ENV AWS_REGION=us-east-1 \

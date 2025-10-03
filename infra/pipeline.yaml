@@ -58,6 +58,10 @@ Parameters:
   JobsTableName:
     Type: String
     Description: Name of DynamoDB jobs table (for environment variable)
+  SamCheckpointKey:
+    Type: String
+    Default: sam_vit_b.pth
+    Description: S3 object key of the SAM checkpoint to auto-fetch at startup
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -69,7 +73,7 @@ Metadata:
       - Label: { default: Service } 
         Parameters: [ProjectName, ContainerCPU, ContainerMemory, DesiredCount, ContainerPort, HealthCheckPath]
       - Label: { default: Data Stores }
-        Parameters: [DatasetsBucketName, OutputsBucketName, ModelsBucketName, JobsQueueArn, JobsQueueUrl, JobsTableArn, JobsTableName]
+        Parameters: [DatasetsBucketName, OutputsBucketName, ModelsBucketName, JobsQueueArn, JobsQueueUrl, JobsTableArn, JobsTableName, SamCheckpointKey]
 
 Resources:
   EcrRepository:
@@ -206,6 +210,8 @@ Resources:
               Value: !Ref OutputsBucketName
             - Name: MODELS_BUCKET
               Value: !Ref ModelsBucketName
+            - Name: SAM_CHECKPOINT_KEY
+              Value: !Ref SamCheckpointKey
             - Name: JOBS_QUEUE_URL
               Value: !Ref JobsQueueUrl
             - Name: JOBS_TABLE

@@ -10,6 +10,7 @@ import time
 import zipfile
 import concurrent.futures
 import shutil
+import sys
 from typing import List, Dict, Any, Optional, Tuple
 
 import numpy as np  # type: ignore
@@ -62,13 +63,13 @@ _SAM_MODEL_ID: Optional[str] = None
 _DATASETS: Dict[str, Dict[str, Any]] = {}
 
 def _get_default_model_type():
-    """Get default model type based on loaded SAM package.
+    """Determine default model type.
 
-    For HQ-SAM we prefer the tiny variant for speed.
-    For upstream (regular) SAM the smallest officially distributed weight is ViT-B.
-    (There is no canonical 'vit_t' in the original Meta SAM checkpoints.)
+    Previously we preferred HQ-SAM tiny for speed; requirement change: always prefer
+    the ViT-B variant for higher quality unless explicitly overridden via the
+    SAM_MODEL_TYPE environment variable.
     """
-    return 'vit_tiny' if _USING_HQ_SAM else 'vit_b'
+    return 'vit_b'
 
 # ---------------------------------------------------------------------------
 # SAM Embedding Cache (Performance optimization: 3-5x speedup)
@@ -1308,10 +1309,19 @@ if __name__ == '__main__':
             print('[startup] boto3 not available; skipping S3 model fetch')
             return
         region = os.environ.get('AWS_REGION', 'us-east-1')
+        # Basic credential presence hint (helps users spot empty env injection)
+        if not (os.environ.get('AWS_ACCESS_KEY_ID') and os.environ.get('AWS_SECRET_ACCESS_KEY')):
+            print('[startup] Warning: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY not detected in env; S3 download likely to fail')
         s3 = boto3.client('s3', region_name=region)
-        # Allow override of the object key via SAM_CHECKPOINT_KEY env
+        # Allow override of the object key via SAM_CHECKPOINT_KEY env plus optional candidate list
         explicit_key = os.environ.get('SAM_CHECKPOINT_KEY')
-        candidate_keys = [k for k in [explicit_key, 'sam_vit_b.pth', 'sam_hq_vit_tiny.pth', 'sam_hq_vit_b.pth'] if k]
+        extra_candidates_env = os.environ.get('SAM_CHECKPOINT_CANDIDATES', '')  # comma-separated
+        extra_candidates = [c.strip() for c in extra_candidates_env.split(',') if c.strip()] if extra_candidates_env else []
+        default_chain = ['sam_vit_b.pth', 'sam_hq_vit_tiny.pth', 'sam_hq_vit_b.pth']
+        candidate_keys = []
+        for k in [explicit_key] + extra_candidates + default_chain:
+            if k and k not in candidate_keys:
+                candidate_keys.append(k)
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         for key in candidate_keys:
             try:
@@ -1330,8 +1340,13 @@ if __name__ == '__main__':
             print('[startup] no model downloaded; SAM endpoints may return model_not_loaded until checkpoint is provided')
 
     _maybe_fetch_model_from_s3()
+    loaded_ok = True
     if warm:
-        _load_sam_model()
+        loaded_ok = _load_sam_model()
+        if not loaded_ok:
+            # Fail fast if we explicitly requested warm start but model was not loaded.
+            print('[startup] WARM_MODEL=1 but model failed to load (checkpoint missing or load error); exiting with code 1')
+            sys.exit(1)
     use_waitress = True
     if use_waitress:
         try:
