@@ -146,7 +146,7 @@ Resources:
       TaskRoleArn: !GetAtt TaskRole.Arn
       ContainerDefinitions:
         - Name: api
-          Image: !Sub ${EcrRepository.RepositoryUri}:latest
+          Image: !Sub ${EcrRepository.RepositoryUri}:bootstrap
           Essential: true
           PortMappings:
             - ContainerPort: !Ref ContainerPort
@@ -185,6 +185,13 @@ Resources:
       LaunchType: FARGATE
       ServiceName: !Sub ${ProjectName}-api
       TaskDefinition: !Ref TaskDefinition
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 0
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      HealthCheckGracePeriodSeconds: 180
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED

@@ -14,9 +14,10 @@ yarn.lock
 .tmp
 .DS_Store
 
-# Model artifacts (mount at runtime)
-models/
-py/models/
+# Model artifacts (previously excluded to keep images slim)
+# We are now baking the SAM checkpoint directly into the image, so allow models directory.
+# models/
+# py/models/
 
 # Temp / runtime outputs
 tmp_datasets/

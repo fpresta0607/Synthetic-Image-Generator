@@ -1,0 +1,161 @@
+name: ECS Deploy (ecs-deploy)
+
+on:
+  push:
+    branches: [ ecs ]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Optional image tag (defaults to short git sha)"
+        required: false
+      force_new_deployment:
+        type: boolean
+        description: "Force new deployment even if image unchanged"
+        default: false
+
+concurrency:
+  group: ecs-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1                    # Override if different
+  ECR_REPOSITORY: photosynth-full          # ECR repo name (no URI)
+  ECS_CLUSTER: photosynth                  # Existing ECS cluster
+  ECS_SERVICE: photosynth-full             # Existing ECS service
+  CONTAINER_NAME: photosynth-full          # Container name inside task definition
+  MIN_HEALTHY_PERCENT: 100                 # Adjust to 50 if capacity constrained
+  MAX_HEALTHY_PERCENT: 200
+  DEPLOY_TIMEOUT: 300                      # Seconds
+
+permissions:
+  id-token: write      # For OIDC
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Derive image tag
+        id: meta
+        run: |
+          TAG_INPUT='${{ github.event.inputs.image_tag }}'
+          if [ -n "$TAG_INPUT" ]; then TAG="$TAG_INPUT"; else TAG="$(git rev-parse --short HEAD)"; fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        run: |
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null 2>&1 || \
+            aws ecr create-repository --repository-name "$ECR_REPOSITORY"
+          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com"
+
+      - name: Build image (multi-stage full target)
+        run: |
+          IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${{ steps.meta.outputs.tag }}"
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+          docker build --target full -t "$IMAGE_URI" .
+
+      - name: Push image
+        run: |
+          docker push "$IMAGE_URI"
+
+      - name: Install dependencies (jq + ecs-deploy)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl
+          sudo curl -L -o /usr/local/bin/ecs-deploy https://raw.githubusercontent.com/silinternational/ecs-deploy/master/ecs-deploy
+          sudo chmod +x /usr/local/bin/ecs-deploy
+          ecs-deploy --help | head -n 5
+
+      - name: Dry-run: show current service state
+        run: |
+          aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query "services[0].{status:status,desired:desiredCount,running:runningCount,deployments:deployments}"
+
+      - name: Deploy service (rolling)
+        id: deploy
+        env:
+          FORCE_NEW: ${{ github.event.inputs.force_new_deployment }}
+        run: |
+          EXTRA=""
+          if [ "$FORCE_NEW" = "true" ]; then EXTRA="--force-new-deployment"; fi
+          ecs-deploy \
+            -c "$ECS_CLUSTER" \
+            -n "$ECS_SERVICE" \
+            -i "$IMAGE_URI" \
+            -C "$CONTAINER_NAME" \
+            -t "$DEPLOY_TIMEOUT" \
+            -m "$MIN_HEALTHY_PERCENT" -M "$MAX_HEALTHY_PERCENT" \
+            --enable-rollback \
+            --region "$AWS_REGION" $EXTRA
+
+      - name: Post-deploy summary
+        run: |
+          aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query "services[0].{running:runningCount,desired:desiredCount,deployments:deployments}"
+          echo "Deployed image: $IMAGE_URI"
+
+      - name: Optional health probe (HTTP 200)
+        if: always()
+        run: |
+          if [ -n "${{ env.SERVICE_HEALTH_URL }}" ]; then \
+            echo "Probing $SERVICE_HEALTH_URL"; \
+            curl -f -m 10 "$SERVICE_HEALTH_URL" || echo 'Health probe failed (non-fatal)'; \
+          else \
+            echo 'SERVICE_HEALTH_URL not set; skipping probe.'; \
+          fi
+
+      - name: Show recent ECS events
+        if: failure()
+        run: |
+          aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query "services[0].events[0:10].{time:createdAt,msg:message}"
+
+      - name: Tail last 50 log lines (if CloudWatch group exists)
+        if: failure()
+        run: |
+          LG="/ecs/${ECS_SERVICE}"
+          if aws logs describe-log-groups --log-group-name-prefix "$LG" --query 'logGroups[?logGroupName==`'"$LG"'`]' --output text | grep -q "$LG"; then \
+            aws logs tail "$LG" --since 30m --max-items 50 || true; \
+          else \
+            echo "Log group $LG not found"; \
+          fi
+
+      - name: Show stopped task reason (if any)
+        if: failure()
+        run: |
+          TASK_ARN=$(aws ecs list-tasks --cluster "$ECS_CLUSTER" --service-name "$ECS_SERVICE" --desired-status STOPPED --query "taskArns[0]" -o text 2>/dev/null || true)
+          if [ "$TASK_ARN" != "None" ] && [ -n "$TASK_ARN" ]; then \
+            aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$TASK_ARN" \
+              --query "tasks[0].{stopCode:stoppedReason,container:containers[0].reason,lastStatus:lastStatus}"; \
+          else \
+            echo 'No stopped tasks.'; \
+          fi
+
+      - name: Fail workflow if deploy step failed
+        if: failure() && steps.deploy.outcome == 'failure'
+        run: exit 1
+
+  # Optional: lightweight image scan job (extend as needed)
+  scan:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy scan (optional)
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          scan-type: 'config'
+          ignore-unfixed: true
+          format: 'table'
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'

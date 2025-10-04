@@ -1,0 +1,178 @@
+version: '3.9'
+
+# Photosynth (SAM image generation) local stack
+# Goals:
+#  - Mirror ECS combined "full" container (node proxy + python backend) on port 3000
+#  - Provide optional split mode (backend + node separate) for debugging
+#  - Provide worker service consuming SQS queue (LocalStack) and using same env vars as production
+#  - Provide LocalStack for S3, SQS, DynamoDB; auto-creates buckets/table/queue via init container
+#  - Allow model weights volume mount (./models -> /app/py/models)
+#  - Make WARM_MODEL toggleable (.env file) without editing compose
+#  - Keep health endpoint alignment with ALB (/api/backend/health when full image is used)
+
+############################
+# Usage
+#   docker compose -f docker-compose.photosynth.yml --profile full up --build
+#   docker compose -f docker-compose.photosynth.yml --profile split up --build
+#   docker compose -f docker-compose.photosynth.yml --profile worker up -d
+#   (Create a .env file next to this compose for overrides; see sample below.)
+#
+# .env sample (put in repo root):
+#   WARM_MODEL=0
+#   SAM_MODEL_TYPE=vit_b
+#   SAM_CHECKPOINT_KEY=sam/vit_b/sam_vit_b.pth
+#   MODELS_BUCKET=photosynth-models-local
+#   DATASETS_BUCKET=photosynth-datasets-local
+#   OUTPUTS_BUCKET=photosynth-outputs-local
+#   JOBS_TABLE=photosynth_jobs
+#   JOBS_QUEUE=sam-jobs
+#   AWS_REGION=us-east-1
+#   MODEL_CANDIDATES=vit_b,vit_l,hq_vit_h
+#   LOG_LEVEL=INFO
+
+############################
+# Networks / Volumes
+############################
+networks:
+  photosynth-net:
+    driver: bridge
+
+volumes:
+  localstack-data:
+  models-cache: {}
+
+############################
+# Services
+############################
+services:
+  # Combined container (python backend + node) replicating ECS "full" image behavior.
+  photosynth-full:
+    profiles: [full]
+    build:
+      context: .
+      target: full
+    image: photosynth-full:dev
+    environment:
+      # Core ports
+      PORT: 3000
+      FLASK_PORT: 5001
+      FLASK_HOST: 0.0.0.0
+      PY_SERVICE_URL: http://127.0.0.1:5001
+      # Model & warm settings
+      WARM_MODEL: ${WARM_MODEL:-0}
+      SAM_MODEL_TYPE: ${SAM_MODEL_TYPE:-vit_b}
+      SAM_CHECKPOINT_KEY: ${SAM_CHECKPOINT_KEY:-sam/vit_b/sam_vit_b.pth}
+      MODEL_CANDIDATES: ${MODEL_CANDIDATES:-vit_b,vit_l,hq_vit_h}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # AWS-style resources (LocalStack endpoints assumed for dev)
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      MODELS_BUCKET: ${MODELS_BUCKET:-photosynth-models-local}
+      DATASETS_BUCKET: ${DATASETS_BUCKET:-photosynth-datasets-local}
+      OUTPUTS_BUCKET: ${OUTPUTS_BUCKET:-photosynth-outputs-local}
+      JOBS_TABLE: ${JOBS_TABLE:-photosynth_jobs}
+      JOBS_QUEUE_URL: http://localstack:4566/000000000000/${JOBS_QUEUE:-sam-jobs}
+    volumes:
+      - ./models:/app/py/models:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - localstack
+    networks:
+      - photosynth-net
+
+  # Split mode backend only (Python / Flask + SAM)
+  photosynth-backend:
+    profiles: [split]
+    build:
+      context: .
+      target: backend
+    image: photosynth-backend:dev
+    environment:
+      FLASK_PORT: 5001
+      FLASK_HOST: 0.0.0.0
+      WARM_MODEL: ${WARM_MODEL:-0}
+      SAM_MODEL_TYPE: ${SAM_MODEL_TYPE:-vit_b}
+      SAM_CHECKPOINT_KEY: ${SAM_CHECKPOINT_KEY:-sam/vit_b/sam_vit_b.pth}
+      MODEL_CANDIDATES: ${MODEL_CANDIDATES:-vit_b,vit_l,hq_vit_h}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      MODELS_BUCKET: ${MODELS_BUCKET:-photosynth-models-local}
+      DATASETS_BUCKET: ${DATASETS_BUCKET:-photosynth-datasets-local}
+      OUTPUTS_BUCKET: ${OUTPUTS_BUCKET:-photosynth-outputs-local}
+      JOBS_TABLE: ${JOBS_TABLE:-photosynth_jobs}
+      JOBS_QUEUE_URL: http://localstack:4566/000000000000/${JOBS_QUEUE:-sam-jobs}
+    volumes:
+      - ./models:/app/py/models:ro
+    ports:
+      - "5001:5001"
+    depends_on:
+      - localstack
+    networks:
+      - photosynth-net
+
+  # Split mode node proxy / UI
+  photosynth-node:
+    profiles: [split]
+    build:
+      context: .
+      target: node
+    image: photosynth-node:dev
+    environment:
+      PORT: 3000
+      PY_SERVICE_URL: http://photosynth-backend:5001
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - photosynth-backend
+    networks:
+      - photosynth-net
+
+  # Worker SQS consumer
+  photosynth-worker:
+    profiles: [worker,full,split]
+    build:
+      context: .
+      target: worker
+    image: photosynth-worker:dev
+    environment:
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      DATASETS_BUCKET: ${DATASETS_BUCKET:-photosynth-datasets-local}
+      OUTPUTS_BUCKET: ${OUTPUTS_BUCKET:-photosynth-outputs-local}
+      MODELS_BUCKET: ${MODELS_BUCKET:-photosynth-models-local}
+      JOBS_TABLE: ${JOBS_TABLE:-photosynth_jobs}
+      JOBS_QUEUE_URL: http://localstack:4566/000000000000/${JOBS_QUEUE:-sam-jobs}
+      SAM_CHECKPOINT: /app/py/models/sam_vit_b.pth
+    volumes:
+      - ./models:/app/py/models:ro
+    depends_on:
+      - localstack
+    networks:
+      - photosynth-net
+
+  # LocalStack providing S3, SQS, DynamoDB
+  localstack:
+    image: localstack/localstack:2.3
+    environment:
+      SERVICES: s3,sqs,dynamodb
+      DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+      DEBUG: ${LOCALSTACK_DEBUG:-0}
+    ports:
+      - "4566:4566"
+    volumes:
+      - localstack-data:/var/lib/localstack
+    networks:
+      - photosynth-net
+
+  # OPTIONAL: Minimal health container (mirrors the ECS bootstrap health responses)
+  photosynth-health:
+    profiles: [health]
+    build:
+      context: ./_minihealth
+    image: photosynth-health:dev
+    ports:
+      - "3900:3000"  # Expose separately to avoid conflict when testing alongside others
+    networks:
+      - photosynth-net
+
+# End of file

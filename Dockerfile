@@ -34,8 +34,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Copy application code
 COPY py /app/py
 
-# Create models dir (weights can be mounted)
+# Ensure models directory exists before copying checkpoint
 RUN mkdir -p /app/py/models
+
+# Copy model checkpoint directly (baking into image). Assumes file exists at project root models/sam_vit_b.pth
+# If absent, build will fail; ensures deterministic availability without S3.
+COPY models/sam_vit_b.pth /app/py/models/sam_vit_b.pth
+
+# (Models dir already created above; retained comment for clarity)
 
 ENV FLASK_PORT=5001 \
     FLASK_HOST=0.0.0.0
@@ -51,6 +57,8 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install gunicorn waitress
 WORKDIR /app/py
 # Entrypoint: prefer app bootstrap (includes warm logic); fallback to gunicorn if env USE_GUNICORN=1
 COPY py/app.py /app/py/app.py
+ENV SAM_CHECKPOINT=/app/py/models/sam_vit_b.pth
+HEALTHCHECK --interval=30s --timeout=5s --retries=5 CMD curl -fsS http://127.0.0.1:5001/health || exit 1
 ENTRYPOINT ["bash","-c","if [ \"$USE_GUNICORN\" = '1' ]; then gunicorn -w ${GUNICORN_WORKERS:-1} -b 0.0.0.0:5001 app:app; else python app.py; fi"]
 
 ############################
@@ -71,18 +79,19 @@ CMD ["node","server.js"]
 # Combined image (backend + node via lightweight process manager)
 ############################
 FROM python-base AS full
-# Install node (using apt) for simplicity
-RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=cache,target=/root/.cache/pip pip install gunicorn waitress
 WORKDIR /app
+# Copy built node server (already has dependencies installed in node stage)
 COPY --from=node /app/server /app/server
-RUN cd server && npm install --production --no-audit --no-fund
-# Copy backend code & deps already in base
-ENV PORT=3000 PY_SERVICE_URL=http://127.0.0.1:5001
+# Copy node runtime from node stage so 'node' is available (previous optimization removed apt install)
+# Copy full node runtime (binary + npm + libs) from node stage for reliability
+COPY --from=node /usr/local /usr/local
+ENV PATH=/usr/local/bin:/usr/local/lib/node_modules/npm/bin:$PATH NODE_ENV=production
+ENV PORT=3000 PY_SERVICE_URL=http://127.0.0.1:5001 SAM_CHECKPOINT=/app/py/models/sam_vit_b.pth
 EXPOSE 3000 5001
-# Simple start script launches Python then Node
 COPY docker/entrypoint-full.sh /entrypoint-full.sh
 RUN chmod +x /entrypoint-full.sh
+HEALTHCHECK --interval=30s --timeout=5s --retries=5 CMD curl -fsS http://127.0.0.1:3000/api/backend/health || curl -fsS http://127.0.0.1:3000/ || exit 1
 ENTRYPOINT ["/entrypoint-full.sh"]
 
 ############################

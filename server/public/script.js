@@ -39,6 +39,11 @@ const proceedToEditsBtn = document.getElementById("proceedToEditsBtn");
 const stepGenerate = document.getElementById("stepGenerate");
 const templateEditsList = document.getElementById("templateEditsList");
 const generateBtn = document.getElementById("generateBtn");
+const backlightToggle = document.getElementById("backlightToggle");
+
+function isElementInStep(stepEl){
+  return stepEl && !stepEl.hasAttribute('hidden');
+}
 const generateStatus = document.getElementById("generateStatus");
 const generateResults = document.getElementById("generateResults");
 const downloadAllBtn = document.getElementById("downloadAllBtn");
@@ -572,7 +577,8 @@ previewTemplateBtn.addEventListener("click", async () => {
         dataset_id: datasetState.datasetId,
         edits,
         image_id: targetImage.id,
-        class_filter: classFilter
+        class_filter: classFilter,
+        backlight_simulation: backlightToggle && backlightToggle.checked ? true : undefined
       })
     });
     const data = await resp.json();
@@ -594,10 +600,22 @@ previewTemplateBtn.addEventListener("click", async () => {
   }
 });
 
+// When the preview class filter changes, re-render the template edits list
+if (previewClassFilter) {
+  previewClassFilter.addEventListener('change', () => {
+    if (isElementInStep(stepGenerate)) {
+      renderTemplateEdits();
+    }
+  });
+}
+
 // Step 3: Edit Configuration & Generation
 function renderTemplateEdits() {
   templateEditsList.innerHTML = "";
+  const activeClass = previewClassFilter ? previewClassFilter.value : "";
   datasetState.templates.forEach((template, idx) => {
+    // If a class filter is active, only show templates whose class matches (or hide if mismatch)
+    if (activeClass && template.class !== activeClass) return;
     const block = document.createElement("div");
     block.className = "template-edit-block";
     const header = document.createElement("h4");
@@ -672,7 +690,8 @@ generateBtn.addEventListener("click", async () => {
   });
   const payload = {
     dataset_id: datasetState.datasetId,
-    edits
+    edits,
+    backlight_simulation: backlightToggle && backlightToggle.checked ? true : undefined
   };
   try {
     const resp = await fetch("/api/sam/dataset/apply_stream", {

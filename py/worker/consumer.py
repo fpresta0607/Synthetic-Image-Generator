@@ -95,11 +95,7 @@ def handle_job(msg):
         except Exception:
             pass
 
-    # Precompute embeddings
-    try:
-        requests.post("http://127.0.0.1:5001/sam/dataset/precompute", json={"dataset_id": dataset_id}, timeout=300)
-    except Exception:
-        pass
+    # Precompute removed: embeddings generated lazily per image
 
     # Build apply payload
     templ_payload = []

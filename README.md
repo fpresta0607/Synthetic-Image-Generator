@@ -295,7 +295,6 @@ Core model & server:
 - `WARM_MODEL` – `1` (default) preloads SAM at startup, `0` lazy loads on first request.
 
 Performance & quality knobs:
-- `PRECOMPUTE_EMBEDDINGS` – `1` (default) enables embedding precompute endpoint & auto precompute on dataset init; set `0` to disable.
 - `DOWNSCALE_MAX` – Max longer image side before inference (default `1600`). Lower for speed (e.g. `1200` or `1024`).
 - `OUTPUT_FORMAT` – `WEBP` (default) or `PNG` for streamed/generated variants.
 - `WEBP_QUALITY` – WEBP quality (default `88`). Lower (75–80) for faster, smaller outputs.
@@ -405,7 +404,6 @@ services:
 - Node: `GET /health` returns `{ status: 'ok' }`.
 
 Additional:
-- Precompute endpoint: `POST /sam/dataset/precompute {"dataset_id": "..."}` warms embeddings (speeds later generation). Returns counts added / total.
 - Dataset preview endpoint: `POST /sam/dataset/point_preview` (used internally by UI) safely rescales mask without distorting via proper PIL resize.
 
 ### 7. Scaling Considerations
@@ -458,7 +456,6 @@ Core components:
 - GPU Workers: ECS (Fargate GPU) or EKS nodes running the Python container. Each worker:
 	1. Polls SQS for a job
 	2. Downloads dataset images (S3 prefix like `datasets/{dataset_id}/`)
-	3. Runs precompute (if not already cached) and streaming generation
 	4. Emits progress events (option A: push to WebSocket service keyed by job id; option B: write progress JSON objects to S3 with object versioning; option C: publish SNS -> Lambda -> WebSocket broadcast)
 	5. Writes final variants to S3 under `outputs/{job_id}/`.
 - Metadata Store: DynamoDB (jobs table: partition `job_id`, attributes: status, progress, created_at, dataset_id), optional TTL for cleanup.
@@ -494,7 +491,6 @@ Cost Optimization:
 | Memory stability | Lower `EMBED_CACHE_MAX` | Evict oldest embeddings |
 | Warm first request | `WARM_MODEL=1` | Avoid cold start pause |
 | Faster GPU throughput | `SAM_FP16=1` | Only if CUDA + supports fp16 |
-| Faster region reuse | Precompute endpoint | Call after dataset init before generation |
 
 ### 14. Maintenance & Cleanup
 - Datasets older than `DATASET_TTL_HOURS` removed opportunistically (triggered on new dataset init). For continuous cleanup in long-lived processes add a lightweight background thread calling the internal cleanup every N minutes.
@@ -506,7 +502,6 @@ Cost Optimization:
 ### 15. API Additions (Beyond Earlier Sections)
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/sam/dataset/precompute` | Precompute & cache image embeddings for a dataset (faster subsequent template application) |
 | POST | `/sam/dataset/point_preview` | (UI internal) Return mask preview for a single template point set |
 | POST | `/api/presign` | (Cloud) Create S3 presigned POST for dataset uploads (requires API key if set) |
 | POST | `/api/jobs` | (Cloud) Enqueue a remote generation job into SQS + record in DynamoDB |

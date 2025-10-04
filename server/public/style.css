@@ -78,6 +78,11 @@ footer { text-align:center; font-size:.6rem; color:#6b7680; }
 .sam-apply { display:flex; gap:.5rem; align-items:center; margin-top:.65rem; flex-wrap:wrap; }
 .result-img { background:#0d0f11; border:1px solid #262d33; border-radius:6px; max-width:100%; min-height:120px; object-fit:contain; }
 .edit-hint { margin-top:.6rem; font-size:.55rem; color:#6f7d88; line-height:1.1rem; }
+.backlight-toggle { display:flex; align-items:center; gap:.4rem; font-size:.55rem; font-weight:600; letter-spacing:.3px; background:#181b1f; padding:.35rem .55rem; border:1px solid #2a3132; border-radius:6px; margin-right:.75rem; cursor:pointer; -webkit-user-select:none; user-select:none; }
+.backlight-toggle input { transform:scale(1.1); cursor:pointer; }
+.backlight-toggle-label { -webkit-user-select:none; user-select:none; }
+.backlight-row { display:flex; align-items:center; gap:.6rem; flex-wrap:wrap; margin-bottom:.5rem; }
+.backlight-hint { font-size:.5rem; color:#7b8894; letter-spacing:.5px; }
 button#samDownloadBtn { background:linear-gradient(135deg,#10b981,#059669); }
 button#samDownloadBtn:disabled { filter:grayscale(.5); }
 .point-marker { position:absolute; width:10px; height:10px; border-radius:50%; transform:translate(-50%,-50%); box-shadow:0 0 0 2px #000; }
@@ -146,7 +151,7 @@ button.primary { background:linear-gradient(135deg,#2563eb,#1d4ed8); }
 .reference-galleries-row { display:flex; gap:0.75rem; flex-wrap:wrap; align-items:flex-start; }
 .reference-gallery-column { flex:1; min-width:180px; }
 .reference-gallery-heading { margin:0 0 .4rem; font-size:.6rem; text-transform:uppercase; letter-spacing:.5px; color:#8ea1af; }
-.modal-backdrop { position:absolute; inset:0; background:rgba(0,0,0,0.85); backdrop-filter:blur(4px); animation:fadeIn .3s; }
+.modal-backdrop { position:absolute; inset:0; background:rgba(0,0,0,0.85); -webkit-backdrop-filter:blur(4px); backdrop-filter:blur(4px); animation:fadeIn .3s; }
 .modal-content { position:relative; background:linear-gradient(135deg, #1a1d21 0%, #15181c 100%); border:2px solid #3b82f6; border-radius:16px; width:90%; max-width:600px; box-shadow:0 20px 60px rgba(0,0,0,0.8), 0 0 0 1px rgba(59,130,246,0.3); animation:slideUp .3s ease-out; }
 @keyframes slideUp { from { transform:translateY(30px); opacity:0; } to { transform:translateY(0); opacity:1; } }
 .modal-header { display:flex; justify-content:space-between; align-items:center; padding:1.5rem 1.5rem 1rem; border-bottom:1px solid #2a3138; }

@@ -10,6 +10,9 @@ __pycache__/
 models/
 server/checkpoints/
 
+.env
+.creds.env
+
 # Native binaries
 *.dll
 *.lib

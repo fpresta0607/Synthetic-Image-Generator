@@ -56,6 +56,20 @@ _SESSION_LOCK = threading.Lock()
 _SESSIONS: Dict[str, Dict[str, Any]] = {}
 _SAM_PREDICTOR: Optional[Any] = None  # SamPredictor instance when loaded
 _SAM_MODEL_ID: Optional[str] = None
+_USE_DB = os.environ.get('USE_DB','0') == '1'
+_db: Any = None  # will hold db module if enabled
+if _USE_DB:
+    try:  # Attempt relative import first, fallback absolute
+        try:
+            from . import db as _db  # type: ignore
+        except Exception:
+            import db as _db  # type: ignore
+        _db.init_db()  # type: ignore[attr-defined]
+        print('[DB] Database initialized')
+    except Exception as e:
+        print(f'[DB] Failed to initialize database; falling back to in-memory: {e}')
+        _USE_DB = False
+        _db = None
 
 # ---------------------------------------------------------------------------
 # DATASET (Bulk) in-memory store (non-persistent)
@@ -80,7 +94,6 @@ _EMBEDDING_CACHE: Dict[str, Any] = {}  # {cache_key: embedding_features}
 # Performance / configuration knobs (override via environment variables)
 # ---------------------------------------------------------------------------
 MAX_WORKERS = int(os.environ.get('GEN_MAX_WORKERS', '1'))  # >1 not yet using separate predictors
-PRECOMPUTE_ENABLED = os.environ.get('PRECOMPUTE_EMBEDDINGS', '1') == '1'
 DOWNSCALE_MAX = int(os.environ.get('DOWNSCALE_MAX', '1600'))  # Default 1600px longer side
 SAM_FP16 = os.environ.get('SAM_FP16', '0') == '1'
 OUTPUT_FORMAT = os.environ.get('OUTPUT_FORMAT', 'WEBP').upper()  # Default WEBP for faster transfer
@@ -684,12 +697,14 @@ def sam_apply():
     image_id = str(payload.get('image_id')) if payload.get('image_id') else ''
     edits = payload.get('edits', [])  # list of {component_id, brightness,...}
     export_mask = bool(payload.get('export_mask', False))
+    backlight_simulation_request = bool(payload.get('backlight_simulation', False))  # global switch
     sess = _get_session(image_id)
     if not sess:
         return {'error': 'invalid image_id'}, 400
     base_img = sess['image']
     # Build combined mask per component and perform per-component edits
     out = base_img.copy()
+    backlight_union = None  # accumulate mask for backlight if requested per-edit
     for e in edits:
         cid = e.get('component_id')
         comp = sess['components'].get(cid) if cid in sess['components'] else None
@@ -723,6 +738,34 @@ def sam_apply():
                 blended = (opacity_val * converted[region].astype(np.float32) + (1-opacity_val) * prev[region].astype(np.float32)).astype(np.uint8)
                 converted[region] = blended
         out = converted
+        if e.get('backlight_simulation'):
+            backlight_union = mask if backlight_union is None else (backlight_union | mask)
+
+    # If any edit requested backlight simulation or a global flag is set, build silhouette result.
+    if backlight_simulation_request or backlight_union is not None:
+        if backlight_union is None:
+            # Build union from edits (component_ids) or fall back to all components if none specified
+            comp_ids = [e.get('component_id') for e in edits if e.get('component_id') in sess['components']] if edits else list(sess['components'].keys())
+            for cid in comp_ids:
+                comp = sess['components'].get(cid)
+                if not comp:
+                    continue
+                backlight_union = comp['mask'] if backlight_union is None else (backlight_union | comp['mask'])
+        if backlight_union is None:
+            return {'error': 'no components available for backlight_simulation'}, 400
+        h, w = backlight_union.shape
+        silhouette = np.ones((h, w, 3), dtype=np.uint8) * 255  # white background
+        silhouette[backlight_union] = 0  # black subject
+        png_bytes = to_png_bytes(silhouette)
+        resp_obj: Dict[str, Any] = {'image_id': image_id, 'variant_png': base64.b64encode(png_bytes).decode('ascii'), 'backlight_simulation': True}
+        if export_mask and edits and len(edits) == 1:
+            cid = edits[0].get('component_id')
+            comp = sess['components'].get(cid)
+            if comp:
+                mask_img = Image.fromarray((comp['mask']*255).astype(np.uint8), mode='L')
+                buf = io.BytesIO(); mask_img.save(buf, format='PNG'); buf.seek(0)
+                resp_obj['component_mask_png'] = base64.b64encode(buf.read()).decode('ascii')
+        return resp_obj
     png_bytes = to_png_bytes(out)
     resp_obj: Dict[str, Any] = {'image_id': image_id}
     resp_obj['variant_png'] = base64.b64encode(png_bytes).decode('ascii')
@@ -1019,6 +1062,11 @@ def dataset_init():
         except Exception:
             continue
     _DATASETS[ds_id] = {'images': images_meta, 'templates': {}, 'created_at': time.time()}
+    if _USE_DB and _db:
+        try:
+            _db.create_dataset(ds_id, images_meta)
+        except Exception as e:
+            print(f'[DB] create_dataset failed: {e}')
     _maybe_cleanup_datasets()
     return {'dataset_id': ds_id, 'images': [{'id':m['id'],'filename':m['filename'],'thumb_b64':m['thumb_b64']} for m in images_meta]}
 
@@ -1027,6 +1075,13 @@ def dataset_template_save():
     data = request.get_json(force=True, silent=True) or {}
     ds_id = data.get('dataset_id','')
     ds = _DATASETS.get(ds_id)
+    if not ds and _USE_DB and _db and ds_id:
+        loaded = _db.load_dataset(ds_id)
+        if loaded:
+            _DATASETS[ds_id] = {'images': loaded['images'], 'templates': {}, 'created_at': time.time()}
+            ds = _DATASETS.get(ds_id)
+            # Load templates too
+            _DATASETS[ds_id]['templates'] = _db.load_templates(ds_id)
     if not ds and ds_id:
         _hydrate_dataset_from_s3(ds_id)
         ds = _DATASETS.get(ds_id)
@@ -1043,12 +1098,22 @@ def dataset_template_save():
     if not norm: return {'error':'no_valid_points'}, 400
     tid = uuid.uuid4().hex
     ds['templates'][tid] = {'id': tid, 'name': name, 'class': template_class, 'points': norm, 'created_at': time.time()}
+    if _USE_DB and _db:
+        try:
+            _db.store_template(ds_id, tid, name, template_class, json.dumps(norm))
+        except Exception as e:
+            print(f'[DB] store_template failed: {e}')
     return {'template_id': tid, 'name': name, 'class': template_class, 'count': len(norm)}
 
 @app.route('/sam/dataset/templates', methods=['GET'])
 def dataset_templates():
     ds_id = request.args.get('dataset_id','')
     ds = _DATASETS.get(ds_id)
+    if not ds and _USE_DB and _db and ds_id:
+        loaded = _db.load_dataset(ds_id)
+        if loaded:
+            _DATASETS[ds_id] = {'images': loaded['images'], 'templates': _db.load_templates(ds_id), 'created_at': time.time()}
+            ds = _DATASETS.get(ds_id)
     if not ds and ds_id:
         _hydrate_dataset_from_s3(ds_id)
         ds = _DATASETS.get(ds_id)
@@ -1134,6 +1199,7 @@ def dataset_template_preview():
         return {'error':'sam_model_not_loaded'}, 500
     
     edits = data.get('edits', {})
+    backlight_simulation = bool(data.get('backlight_simulation', False))
     if not ds['images']: return {'error':'no_images'}, 400
     
     # Use specified image or find first matching by class filter
@@ -1156,9 +1222,20 @@ def dataset_template_preview():
         arr = np.array(img)
         # Apply templates with class filtering - use cache key for embedding reuse
         cache_key = f"{ds_id}_template_preview_{first_img['id']}"
-        edited, _ = _apply_templates_with_class_filter(arr, ds['templates'], edits, first_img['filename'], cache_key=cache_key)
-        buf = io.BytesIO()
-        Image.fromarray(edited).save(buf, format='PNG')
+        edited, cum_mask = _apply_templates_with_class_filter(arr, ds['templates'], edits, first_img['filename'], cache_key=cache_key)
+        if backlight_simulation:
+            if cum_mask is None:
+                return {'error': 'no_components_available_for_backlight'}, 400
+            h, w = cum_mask.shape
+            silhouette = np.ones((h, w, 3), dtype=np.uint8) * 255
+            silhouette[cum_mask] = 0
+            buf = io.BytesIO(); Image.fromarray(silhouette).save(buf, format='PNG')
+            return {
+                'variant_png': base64.b64encode(buf.getvalue()).decode('ascii'),
+                'filename': first_img['filename'],
+                'backlight_simulation': True
+            }
+        buf = io.BytesIO(); Image.fromarray(edited).save(buf, format='PNG')
         return {
             'variant_png': base64.b64encode(buf.getvalue()).decode('ascii'),
             'filename': first_img['filename']
@@ -1219,37 +1296,6 @@ def _apply_templates_with_class_filter(arr: np.ndarray, templates: Dict[str, Dic
         cumulative = mask if cumulative is None else (cumulative | mask)
     return out, cumulative
 
-def _precompute_embeddings(ds_id: str, ds: Dict[str, Any]):
-    if not PRECOMPUTE_ENABLED:
-        return 0
-    if _SAM_PREDICTOR is None and not _load_sam_model():
-        return 0
-    predictor = _SAM_PREDICTOR
-    assert predictor is not None
-    count = 0
-    for im in ds['images']:
-        key = f"{ds_id}_gen_{im['id']}"
-        if key in _EMBEDDING_CACHE:
-            continue
-        try:
-            arr = _maybe_downscale(np.array(Image.open(im['path']).convert('RGB')))
-            predictor.set_image(arr)
-            _EMBEDDING_CACHE[key] = predictor.features
-            count += 1
-        except Exception as e:  # pragma: no cover
-            print('[precompute] skip', im.get('path'), e)
-    print(f"[precompute] cached embeddings for {count} images (total keys={len(_EMBEDDING_CACHE)})")
-    return count
-
-@app.route('/sam/dataset/precompute', methods=['POST'])
-def dataset_precompute():
-    data = request.get_json(force=True, silent=True) or {}
-    ds_id = data.get('dataset_id')
-    if not ds_id: return {'error':'dataset_id_required'}, 400
-    ds = _DATASETS.get(ds_id)
-    if not ds: return {'error':'dataset_not_found'}, 404
-    added = _precompute_embeddings(ds_id, ds)
-    return {'cached_added': added, 'total_cache': len(_EMBEDDING_CACHE)}
 
 @app.route('/sam/dataset/apply_stream', methods=['POST'])
 def dataset_apply_stream():
@@ -1260,12 +1306,12 @@ def dataset_apply_stream():
     if not ds: return {'error':'dataset_not_found'}, 404
     edits = payload.get('edits', {})
     export_mask = bool(payload.get('export_mask', False))
+    backlight_simulation = bool(payload.get('backlight_simulation', False))
     if _SAM_PREDICTOR is None and not _load_sam_model('vit_b'):
         return {'error':'sam_model_not_loaded'}, 500
     images = ds['images']
     if not ds['templates']: return {'error':'no_templates'}, 400
-    if PRECOMPUTE_ENABLED:
-        _precompute_embeddings(ds_id, ds)
+    # Precompute removed: embeddings are generated on demand per image
 
     def _stream():
         total = len(images)
@@ -1279,6 +1325,16 @@ def dataset_apply_stream():
                 cache_key = f"{ds_id}_gen_{im['id']}"
                 edited, cum_mask = _apply_templates_with_class_filter(arr, ds['templates'], edits, im['filename'], cache_key=cache_key)
                 out_bytes = _output_image_bytes(edited)
+                if backlight_simulation:
+                    # If backlight simulation requested, produce black silhouette on white background
+                    if cum_mask is None:
+                        out['error'] = 'no_components_for_backlight'
+                    else:
+                        h, w = cum_mask.shape
+                        silhouette = np.ones((h, w, 3), dtype=np.uint8) * 255
+                        silhouette[cum_mask] = 0
+                        out_bytes = to_png_bytes(silhouette)
+                        out['backlight_simulation'] = True
                 out['variant_png'] = base64.b64encode(out_bytes).decode('ascii')
                 if export_mask and cum_mask is not None:
                     mb = io.BytesIO(); Image.fromarray((cum_mask*255).astype(np.uint8)).save(mb, format='PNG', compress_level=1)
