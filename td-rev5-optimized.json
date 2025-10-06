@@ -1,0 +1,69 @@
+{
+  "family": "photosynth-full",
+  "executionRoleArn": "arn:aws:iam::401753844565:role/ecsTaskExecutionRole",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "2048",
+  "memory": "4096",
+  "containerDefinitions": [
+    {
+      "name": "photosynth-full",
+      "image": "401753844565.dkr.ecr.us-east-1.amazonaws.com/photosynth-full:full-fix",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "protocol": "tcp"
+        },
+        {
+          "containerPort": 5001,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "PY_SERVICE_URL",
+          "value": "http://127.0.0.1:5001"
+        },
+        {
+          "name": "FLASK_PORT",
+          "value": "5001"
+        },
+        {
+          "name": "WARM_MODEL",
+          "value": "1"
+        },
+        {
+          "name": "GEN_MAX_WORKERS",
+          "value": "2"
+        },
+        {
+          "name": "EMBED_CACHE_MAX",
+          "value": "2000"
+        },
+        {
+          "name": "DOWNSCALE_MAX",
+          "value": "2048"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/photosynth-full",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "curl -f http://localhost:3000/api/backend/health || curl -f http://localhost:3000/ || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      }
+    }
+  ]
+}

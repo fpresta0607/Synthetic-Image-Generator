@@ -15,7 +15,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # System deps (git for segment-anything, build essentials for some wheels)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl build-essential ca-certificates && \
+    bash git curl build-essential ca-certificates && \
     update-ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
@@ -83,14 +83,18 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install gunicorn waitress
 WORKDIR /app
 # Copy built node server (already has dependencies installed in node stage)
 COPY --from=node /app/server /app/server
-# Copy node runtime from node stage so 'node' is available (previous optimization removed apt install)
-# Copy full node runtime (binary + npm + libs) from node stage for reliability
-COPY --from=node /usr/local /usr/local
+# IMPORTANT: Do NOT overwrite all of /usr/local (that would delete Python & installed wheels).
+# Instead copy only the node runtime pieces we require.
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+# Provide npm/npx shims
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 ENV PATH=/usr/local/bin:/usr/local/lib/node_modules/npm/bin:$PATH NODE_ENV=production
 ENV PORT=3000 PY_SERVICE_URL=http://127.0.0.1:5001 SAM_CHECKPOINT=/app/py/models/sam_vit_b.pth
 EXPOSE 3000 5001
 COPY docker/entrypoint-full.sh /entrypoint-full.sh
-RUN chmod +x /entrypoint-full.sh
+RUN sed -i 's/\r$//' /entrypoint-full.sh && chmod +x /entrypoint-full.sh
 HEALTHCHECK --interval=30s --timeout=5s --retries=5 CMD curl -fsS http://127.0.0.1:3000/api/backend/health || curl -fsS http://127.0.0.1:3000/ || exit 1
 ENTRYPOINT ["/entrypoint-full.sh"]
 

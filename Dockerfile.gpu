@@ -1,0 +1,136 @@
+## syntax=docker/dockerfile:1.6
+# GPU-optimized Multi-stage build for SAM Bulk Dataset Generator
+# Uses NVIDIA CUDA base image for GPU acceleration on Fargate
+
+############################
+# Base Python + CUDA stage
+############################
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04 AS python-base
+
+# Install Python 3.11
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3.11-distutils \
+    python3-pip \
+    bash git curl build-essential ca-certificates && \
+    update-ca-certificates && \
+    ln -sf /usr/bin/python3.11 /usr/bin/python && \
+    ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    CUDA_VISIBLE_DEVICES=0 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+WORKDIR /app
+COPY py/requirements-sam-gpu.txt ./py/
+
+# Harden pip installation + enable pip cache mount
+ENV PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=5
+
+# Install Python deps (GPU-enabled PyTorch)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --upgrade pip==24.2 setuptools wheel && \
+    pip install -r py/requirements-sam-gpu.txt
+
+# Copy application code
+COPY py /app/py
+
+# Ensure models directory exists
+RUN mkdir -p /app/py/models
+
+# Copy model checkpoint
+COPY models/sam_vit_b.pth /app/py/models/sam_vit_b.pth
+
+ENV FLASK_PORT=5001 \
+    FLASK_HOST=0.0.0.0 \
+    SAM_CHECKPOINT=/app/py/models/sam_vit_b.pth
+
+EXPOSE 5001
+
+############################
+# Backend runnable image (GPU)
+############################
+FROM python-base AS backend
+WORKDIR /app/py
+COPY py/app.py /app/py/app.py
+
+# GPU optimization env vars
+ENV SAM_CHECKPOINT=/app/py/models/sam_vit_b.pth \
+    WARM_MODEL=1 \
+    SAM_FP16=1 \
+    GEN_MAX_WORKERS=2 \
+    DOWNSCALE_MAX=2048
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=5 CMD curl -fsS http://127.0.0.1:5001/health || exit 1
+ENTRYPOINT ["python", "app.py"]
+
+############################
+# Node stage (unchanged)
+############################
+FROM node:20-slim AS node
+WORKDIR /app/server
+COPY server/package*.json ./
+RUN --mount=type=cache,target=/root/.npm npm install --omit=dev --no-audit --no-fund
+COPY server /app/server
+ENV PORT=3000 PY_SERVICE_URL=http://localhost:5001
+EXPOSE 3000
+CMD ["node","server.js"]
+
+############################
+# Combined image (backend + node, GPU-enabled)
+############################
+FROM python-base AS full
+WORKDIR /app
+
+# Copy built node server
+COPY --from=node /app/server /app/server
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+
+# Provide npm/npx shims
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
+ENV PATH=/usr/local/bin:/usr/local/lib/node_modules/npm/bin:$PATH \
+    NODE_ENV=production \
+    PORT=3000 \
+    PY_SERVICE_URL=http://127.0.0.1:5001 \
+    SAM_CHECKPOINT=/app/py/models/sam_vit_b.pth \
+    WARM_MODEL=1 \
+    SAM_FP16=1 \
+    GEN_MAX_WORKERS=2 \
+    DOWNSCALE_MAX=2048
+
+EXPOSE 3000 5001
+
+COPY docker/entrypoint-full.sh /entrypoint-full.sh
+RUN sed -i 's/\r$//' /entrypoint-full.sh && chmod +x /entrypoint-full.sh
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=5 CMD curl -fsS http://127.0.0.1:3000/api/backend/health || curl -fsS http://127.0.0.1:3000/ || exit 1
+ENTRYPOINT ["/entrypoint-full.sh"]
+
+############################
+# Worker stage (GPU-enabled)
+############################
+FROM python-base AS worker
+COPY py/worker /app/py/worker
+WORKDIR /app/py/worker
+ENV AWS_REGION=us-east-1 \
+    DATASETS_BUCKET=unset \
+    OUTPUTS_BUCKET=unset \
+    MODELS_BUCKET=unset \
+    JOBS_TABLE=sam_jobs \
+    JOBS_QUEUE_URL=unset \
+    SAM_CHECKPOINT=/app/py/models/sam_vit_b.pth \
+    WARM_MODEL=1 \
+    SAM_FP16=1 \
+    GEN_MAX_WORKERS=2
+ENTRYPOINT ["python","consumer.py"]

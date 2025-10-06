@@ -12,6 +12,7 @@ server/checkpoints/
 
 .env
 .creds.env
+creds.env  # avoid committing raw AWS credentials; prefer AWS SSO or role assumption
 
 # Native binaries
 *.dll

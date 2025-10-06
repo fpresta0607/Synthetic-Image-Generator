@@ -1,0 +1,29 @@
+# Base requirements
+flask==3.0.3
+numpy==1.26.4
+scikit-image==0.23.2
+Pillow==10.4.0
+
+SQLAlchemy==2.0.32
+alembic==1.13.2
+
+# PyTorch with CUDA 12.1 support (GPU acceleration)
+--index-url https://download.pytorch.org/whl/cu121
+torch==2.3.1+cu121
+torchvision==0.18.1+cu121
+torchaudio==2.3.1+cu121
+
+# OpenCV needed by segment-anything utilities
+opencv-python==4.10.0.84
+
+# segment-anything (GitHub source install)
+git+https://github.com/facebookresearch/segment-anything.git
+
+# Worker / cloud integration
+requests==2.32.3
+boto3==1.34.127
+six==1.16.0
+
+# Production server
+gunicorn==22.0.0
+waitress==3.0.0
