@@ -7,9 +7,16 @@
 ############################
 FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04 AS python-base
 
+# Prevent tzdata interactive prompt
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=America/New_York
+
 # Install Python 3.11
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common && \
+    software-properties-common \
+    tzdata && \
+    ln -fs /usr/share/zoneinfo/America/New_York /etc/localtime && \
+    dpkg-reconfigure --frontend noninteractive tzdata && \
     add-apt-repository -y ppa:deadsnakes/ppa && \
     apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
@@ -38,7 +45,7 @@ ENV PIP_DEFAULT_TIMEOUT=120 \
 # Install Python deps (GPU-enabled PyTorch)
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install --upgrade pip==24.2 setuptools wheel && \
-    pip install -r py/requirements-sam-gpu.txt
+    pip install --ignore-installed -r py/requirements-sam-gpu.txt
 
 # Copy application code
 COPY py /app/py

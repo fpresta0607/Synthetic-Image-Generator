@@ -1,3 +1,10 @@
+# PyTorch with CUDA 12.1 support (GPU acceleration)
+# Use extra-index-url so we can get PyTorch from CUDA repo AND other packages from PyPI
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.3.1+cu121
+torchvision==0.18.1+cu121
+torchaudio==2.3.1+cu121
+
 # Base requirements
 flask==3.0.3
 numpy==1.26.4
@@ -6,12 +13,6 @@ Pillow==10.4.0
 
 SQLAlchemy==2.0.32
 alembic==1.13.2
-
-# PyTorch with CUDA 12.1 support (GPU acceleration)
---index-url https://download.pytorch.org/whl/cu121
-torch==2.3.1+cu121
-torchvision==0.18.1+cu121
-torchaudio==2.3.1+cu121
 
 # OpenCV needed by segment-anything utilities
 opencv-python==4.10.0.84
