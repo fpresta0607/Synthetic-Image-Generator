@@ -24,6 +24,8 @@ class Image(Base):
     width: Mapped[int] = mapped_column(Integer)
     height: Mapped[int] = mapped_column(Integer)
     thumb_b64: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    content_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)  # SHA256 of image content
+    embedding_cached: Mapped[Optional[bool]] = mapped_column(Integer, nullable=True, default=0)  # 1 if SAM embedding cached
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     dataset: Mapped[Dataset] = relationship('Dataset', back_populates='images')
 
@@ -52,7 +54,17 @@ def create_dataset(ds_id: str, images: List[Dict[str, Any]]):
     with Session(_ENGINE) as s:
         ds = Dataset(id=ds_id)
         for im in images:
-            s.add(Image(id=im['id'], dataset_id=ds_id, filename=im['filename'], path=im['path'], width=im.get('w',0), height=im.get('h',0), thumb_b64=im.get('thumb_b64')))
+            s.add(Image(
+                id=im['id'], 
+                dataset_id=ds_id, 
+                filename=im['filename'], 
+                path=im['path'], 
+                width=im.get('w',0), 
+                height=im.get('h',0), 
+                thumb_b64=im.get('thumb_b64'),
+                content_hash=im.get('content_hash'),
+                embedding_cached=im.get('embedding_cached', 0)
+            ))
         s.add(ds)
         s.commit()
 
@@ -75,7 +87,16 @@ def load_dataset(dataset_id: str) -> Optional[Dict[str, Any]]:
         images = s.query(Image).filter(Image.dataset_id==dataset_id).all()
         return {
             'dataset_id': dataset_id,
-            'images': [ {'id':im.id,'filename':im.filename,'path':im.path,'w':im.width,'h':im.height,'thumb_b64':im.thumb_b64} for im in images ]
+            'images': [ {
+                'id':im.id,
+                'filename':im.filename,
+                'path':im.path,
+                'w':im.width,
+                'h':im.height,
+                'thumb_b64':im.thumb_b64,
+                'content_hash':im.content_hash,
+                'embedding_cached':bool(im.embedding_cached)
+            } for im in images ]
         }
 
 def load_templates(dataset_id: str) -> Dict[str, Dict[str, Any]]:
@@ -90,3 +111,30 @@ def load_templates(dataset_id: str) -> Dict[str, Dict[str, Any]]:
                 pts = []
             out[r.id] = {'id': r.id, 'name': r.name, 'class': r.klass or '', 'points': pts, 'created_at': r.created_at.timestamp()}
         return out
+
+def find_image_by_hash(content_hash: str) -> Optional[Dict[str, Any]]:
+    """Check if an image with this content hash exists and has cached embeddings."""
+    with Session(_ENGINE) as s:
+        img = s.query(Image).filter(Image.content_hash==content_hash, Image.embedding_cached==1).first()
+        if img:
+            return {
+                'id': img.id,
+                'dataset_id': img.dataset_id,
+                'filename': img.filename,
+                'content_hash': img.content_hash,
+                'embedding_cached': bool(img.embedding_cached)
+            }
+        return None
+
+def mark_embedding_cached(dataset_id: str, image_id: str, cached: bool = True):
+    """Mark an image's embedding as cached or uncached."""
+    with Session(_ENGINE) as s:
+        img = s.query(Image).filter(Image.dataset_id==dataset_id, Image.id==image_id).first()
+        if img:
+            img.embedding_cached = 1 if cached else 0
+            s.commit()
+
+def get_cached_images_count(dataset_id: str) -> int:
+    """Count how many images in a dataset already have cached embeddings."""
+    with Session(_ENGINE) as s:
+        return s.query(Image).filter(Image.dataset_id==dataset_id, Image.embedding_cached==1).count()

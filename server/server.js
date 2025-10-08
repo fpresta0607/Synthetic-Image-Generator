@@ -320,6 +320,24 @@ app.post('/api/sam/dataset/template/preview', express.json(), async (req, res) =
   } catch (e) { console.error('[proxy dataset/template/preview] error', e); return res.status(500).json({ error: 'proxy error', detail: String(e) }); }
 });
 
+// Pre-warm cache (compute embeddings for all images)
+app.post('/api/sam/dataset/prewarm', express.json(), async (req, res) => {
+  try {
+    const pyResp = await fetch(`${PY_SERVICE_URL}/sam/dataset/prewarm`, { method: 'POST', body: JSON.stringify(req.body), headers: { 'Content-Type': 'application/json' } });
+    if (!pyResp.ok && pyResp.headers.get('content-type')?.includes('application/json')) {
+      const errData = await pyResp.json();
+      logProxy('dataset/prewarm', { status: pyResp.status, data: errData });
+      return res.status(pyResp.status).json(errData);
+    }
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    pyResp.body.on('data', chunk => res.write(chunk));
+    pyResp.body.on('end', () => res.end());
+    pyResp.body.on('error', err => { console.error('prewarm stream proxy error', err); try { res.write('data: {"error":"stream proxy error"}\n\n'); } catch(_) {} res.end(); });
+  } catch (e) { console.error(e); return res.status(500).json({ error: 'proxy error' }); }
+});
+
 // Backend health proxy for quick ECS debugging
 app.get('/api/backend/health', async (_req, res) => {
   try {

@@ -203,7 +203,97 @@ datasetInitBtn.addEventListener("click", async () => {
         return { ...img, id: backendImg?.id, filename: img.filename };
       });
     }
-    datasetStatus.textContent = `Dataset ${data.dataset_id} ready`;
+    
+    // Show duplicate detection message if any
+    if (data.duplicates_found && data.duplicates_found > 0) {
+      datasetStatus.textContent = `✓ ${data.duplicates_message}`;
+      datasetStatus.style.color = '#5dade2';
+    }
+    
+    // Pre-warm cache to speed up first requests by 10-20x
+    const prewarmProgress = document.getElementById("prewarmProgress");
+    const prewarmTitle = document.getElementById("prewarmTitle");
+    const prewarmSubtitle = document.getElementById("prewarmSubtitle");
+    
+    prewarmProgress.style.display = "flex";
+    prewarmTitle.textContent = `Pre-warming cache (${data.images.length} images)...`;
+    prewarmSubtitle.textContent = "Estimated time: calculating...";
+    
+    try {
+      const prewarmResp = await fetch("/api/sam/dataset/prewarm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dataset_id: data.dataset_id })
+      });
+      
+      if (prewarmResp.ok) {
+        const reader = prewarmResp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let startTime = Date.now();
+        let avgTimePerImage = 0;
+        
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split(/\n\n/);
+          buffer = parts.pop() || "";
+          
+          for (const chunk of parts) {
+            const line = chunk.trim();
+            if (!line.startsWith("data:")) continue;
+            const payloadStr = line.slice(5).trim();
+            try {
+              const obj = JSON.parse(payloadStr);
+              if (obj.done) {
+                prewarmProgress.style.display = "none";
+                let msg = `Dataset ready (cache: ${obj.cache_size} embeddings`;
+                if (obj.computed !== undefined && obj.skipped !== undefined) {
+                  msg += `, computed: ${obj.computed}, skipped: ${obj.skipped}`;
+                }
+                msg += ')';
+                datasetStatus.textContent = msg;
+              } else if (obj.index !== undefined) {
+                const completed = obj.index + 1;
+                const total = obj.total;
+                const elapsed = Date.now() - startTime;
+                
+                // Calculate average time per image (only for computed ones)
+                if (!obj.skipped) {
+                  avgTimePerImage = elapsed / completed;
+                }
+                const remaining = total - completed;
+                const estimatedMs = remaining * avgTimePerImage;
+                
+                // Format time remaining
+                let timeStr = "";
+                if (estimatedMs < 60000) {
+                  timeStr = `${Math.ceil(estimatedMs / 1000)}s`;
+                } else {
+                  const mins = Math.floor(estimatedMs / 60000);
+                  const secs = Math.ceil((estimatedMs % 60000) / 1000);
+                  timeStr = `${mins}m ${secs}s`;
+                }
+                
+                const statusIcon = obj.skipped ? '⚡' : '⏳';
+                const action = obj.skipped ? 'skipped (cached)' : 'computing';
+                prewarmTitle.textContent = `${statusIcon} Pre-warming cache... ${completed}/${total}`;
+                prewarmSubtitle.textContent = `${action} • Est. remaining: ${timeStr} (avg ${(avgTimePerImage / 1000).toFixed(1)}s per image)`;
+              }
+            } catch (e) {
+              /* ignore partial JSON */
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("Prewarm failed, continuing:", e);
+      prewarmProgress.style.display = "none";
+      datasetStatus.textContent = `Dataset ${data.dataset_id} ready`;
+    }
+    
     showStep(stepTemplate);
     renderReferenceGallery();
   } catch (e) {
@@ -282,15 +372,34 @@ function selectReference(img, cardEl) {
 function resizeTemplateCanvas() {
   const displayWidth = templateImg.clientWidth;
   const displayHeight = templateImg.clientHeight;
-  templatePointsCanvas.width = displayWidth;
-  templatePointsCanvas.height = displayHeight;
+  // Use natural dimensions for canvas size to match actual image resolution
+  const naturalWidth = templateImg.naturalWidth || displayWidth;
+  const naturalHeight = templateImg.naturalHeight || displayHeight;
+  
+  templatePointsCanvas.width = naturalWidth;
+  templatePointsCanvas.height = naturalHeight;
   templatePointsCanvas.style.width = displayWidth + 'px';
   templatePointsCanvas.style.height = displayHeight + 'px';
-  // Also resize mask canvas to match
-  templateMaskCanvas.width = displayWidth;
-  templateMaskCanvas.height = displayHeight;
+  // Also resize mask canvas to match natural dimensions
+  templateMaskCanvas.width = naturalWidth;
+  templateMaskCanvas.height = naturalHeight;
   templateMaskCanvas.style.width = displayWidth + 'px';
   templateMaskCanvas.style.height = displayHeight + 'px';
+  
+  // Align overlays with the actual rendered image inside the container
+  const containerWidth = templatePreviewContainer.clientWidth;
+  const containerHeight = templatePreviewContainer.clientHeight;
+  const offsetX = Math.max(0, (containerWidth - displayWidth) / 2);
+  const offsetY = Math.max(0, (containerHeight - displayHeight) / 2);
+  templatePointsCanvas.style.left = offsetX + 'px';
+  templatePointsCanvas.style.top = offsetY + 'px';
+  templateMaskCanvas.style.left = offsetX + 'px';
+  templateMaskCanvas.style.top = offsetY + 'px';
+  
+  // Redraw points if they exist
+  if (datasetState.currentPoints.length > 0) {
+    drawTemplatePoints();
+  }
 }
 
 let currentMaskData = null;
@@ -310,15 +419,19 @@ function drawTemplatePoints() {
   const ctx = templatePointsCanvas.getContext("2d");
   ctx.clearRect(0, 0, templatePointsCanvas.width, templatePointsCanvas.height);
   if (!templateImg.naturalWidth) return;
-  const scaleX = templateImg.clientWidth / templateImg.naturalWidth;
-  const scaleY = templateImg.clientHeight / templateImg.naturalHeight;
+  
+  // Canvas is now sized to natural dimensions, so points are already in correct coordinates
+  // We just need to scale the point radius for display
+  const displayScale = templateImg.clientWidth / templateImg.naturalWidth;
+  const pointRadius = 5 / displayScale; // Scale point size to be visible at any zoom level
+  
   for (const p of datasetState.currentPoints) {
     ctx.beginPath();
     ctx.fillStyle = p.positive ? "#10b981" : "#ef4444";
-    ctx.arc(p.x * scaleX, p.y * scaleY, 5, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, pointRadius, 0, Math.PI * 2);
     ctx.fill();
     ctx.strokeStyle = "#000";
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 2 / displayScale;
     ctx.stroke();
   }
 }
@@ -382,8 +495,8 @@ templatePreviewBtn.addEventListener("click", async () => {
   const w = templateImg.naturalWidth;
   const h = templateImg.naturalHeight;
   const normalizedPoints = datasetState.currentPoints.map(p => ({
-    x_norm: p.x / w,
-    y_norm: p.y / h,
+    x_norm: w > 1 ? p.x / (w - 1) : 0,
+    y_norm: h > 1 ? p.y / (h - 1) : 0,
     positive: p.positive
   }));
   try {
@@ -459,13 +572,14 @@ templateSaveBtn.addEventListener("click", async () => {
   const w = templateImg.naturalWidth;
   const h = templateImg.naturalHeight;
   const normalizedPoints = datasetState.currentPoints.map(p => ({
-    x_norm: p.x / w,
-    y_norm: p.y / h,
+    x_norm: w > 1 ? p.x / (w - 1) : 0,
+    y_norm: h > 1 ? p.y / (h - 1) : 0,
     positive: p.positive
   }));
   const payload = {
     dataset_id: datasetState.datasetId,
     image_filename: datasetState.currentReferenceFilename,
+    image_id: datasetState.currentReferenceId,
     points: normalizedPoints,
     name: templateName.value.trim() || undefined,
     class: templateClass.value || undefined

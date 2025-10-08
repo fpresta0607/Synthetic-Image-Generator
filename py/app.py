@@ -194,8 +194,8 @@ def _maybe_cleanup_datasets():
         except Exception:
             pass
 
-def _predict_sam_mask(arr: np.ndarray, norm_points: List[Dict[str,Any]], cache_key: Optional[str] = None):
-    """Predict SAM mask with embedding cache for 3-5x speedup."""
+def _predict_sam_mask(arr: np.ndarray, points: List[Dict[str,Any]], cache_key: Optional[str] = None):
+    """Predict SAM mask with embedding cache for 3-5x speedup using pixel coordinates."""
     import time
     start = time.time()
     
@@ -205,22 +205,70 @@ def _predict_sam_mask(arr: np.ndarray, norm_points: List[Dict[str,Any]], cache_k
         return None, None
     predictor = _SAM_PREDICTOR; assert predictor is not None
     h, w = arr.shape[:2]
-    if not norm_points:
+    if not points:
         return None, None
     
-    # Use embedding cache if available (3-5x speedup)
-    if cache_key and cache_key in _EMBEDDING_CACHE:
-        predictor.features = _EMBEDDING_CACHE[cache_key]
-        cache_hit = True
-    else:
+    # Include image dimensions in cache key to avoid size mismatches
+    # SAM embeddings are resolution-dependent
+    if cache_key:
+        cache_key = f"{cache_key}_{w}x{h}"
+    
+    cache_hit = False
+    if cache_key:
+        cached_features = _EMBEDDING_CACHE.get(cache_key)
+        if cached_features is not None:
+            original_size: Optional[Tuple[int, int]] = None
+            candidate = None
+            if isinstance(cached_features, dict):
+                candidate = cached_features.get('original_size')
+            else:
+                candidate = getattr(cached_features, 'original_size', None)
+            if candidate is not None:
+                try:
+                    converted = tuple(int(v) for v in candidate)
+                    if len(converted) == 2:
+                        original_size = (converted[0], converted[1])
+                except Exception:
+                    original_size = None
+            if original_size and original_size != (h, w):
+                # Cached embedding was generated at different resolution; discard and recompute.
+                print(f"[SAM] Cache resolution mismatch: cached={original_size} requested=({h}, {w}); recomputing")
+                _EMBEDDING_CACHE.pop(cache_key, None)
+            else:
+                predictor.features = cached_features
+                cache_hit = True
+    if not cache_hit:
         predictor.set_image(arr)
         if cache_key:
             _EMBEDDING_CACHE[cache_key] = predictor.features
-        cache_hit = False
     
-    pts = np.array([[min(w-1,max(0,int(round(p['x_norm']*(w-1))))),
-                     min(h-1,max(0,int(round(p['y_norm']*(h-1)))))] for p in norm_points], dtype=np.float32)
-    labels = np.array([1 if p.get('positive', True) else 0 for p in norm_points], dtype=np.int32)
+    pts_list: List[List[int]] = []
+    labels_list: List[int] = []
+    for p in points:
+        x_px: Optional[int] = None
+        y_px: Optional[int] = None
+        if 'x' in p and 'y' in p:
+            try:
+                x_px = int(round(float(p['x'])))
+                y_px = int(round(float(p['y'])))
+            except (TypeError, ValueError):
+                continue
+        elif 'x_norm' in p and 'y_norm' in p:
+            try:
+                x_px = int(round(float(p['x_norm']) * (w - 1)))
+                y_px = int(round(float(p['y_norm']) * (h - 1)))
+            except (TypeError, ValueError):
+                continue
+        if x_px is None or y_px is None:
+            continue
+        x_px = min(w - 1, max(0, x_px))
+        y_px = min(h - 1, max(0, y_px))
+        pts_list.append([x_px, y_px])
+        labels_list.append(1 if p.get('positive', True) else 0)
+    if not pts_list:
+        return None, None
+    pts = np.asarray(pts_list, dtype=np.float32)
+    labels = np.asarray(labels_list, dtype=np.int32)
     
     with torch.no_grad():  # type: ignore
         masks, scores, _ = predictor.predict(point_coords=pts, point_labels=labels, multimask_output=True)
@@ -377,7 +425,7 @@ def _load_sam_model(model_type: Optional[str] = None, checkpoint_path: Optional[
             msg = str(primary_e)
             if 'torch.cuda.is_available() is False' in msg or 'Attempting to deserialize object on a CUDA device' in msg:
                 print('[SAM] Detected CUDA serialization in checkpoint; forcing CPU map_location load fallback')
-                import torch as _torch  # local import
+                import torch as _torch  # type: ignore  # local import
                 state_dict = _torch.load(checkpoint_path, map_location='cpu')  # type: ignore[arg-type]
                 # Build empty model then load state dict
                 sam = sam_model_registry[model_type]()  # type: ignore[index]
@@ -1011,6 +1059,75 @@ def sam_batch_process_stream():
     return Response(stream_with_context(_gen()), headers=headers)
 
 # ---------------- Dataset Bulk Endpoints ----------------
+@app.route('/sam/dataset/prewarm', methods=['POST'])
+def dataset_prewarm():
+    """Pre-warm cache by computing embeddings for all dataset images.
+    
+    Call this after dataset/init to speed up first requests by 10-20x.
+    Skips images that already have cached embeddings (from previous uploads).
+    Returns progress as Server-Sent Events stream.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    ds_id = data.get('dataset_id')
+    if not ds_id:
+        return {'error': 'dataset_id required'}, 400
+    
+    ds = _DATASETS.get(ds_id)
+    if not ds:
+        return {'error': 'dataset not found'}, 404
+    
+    if _SAM_PREDICTOR is None and not _load_sam_model('vit_b'):
+        return {'error': 'sam_model_not_loaded'}, 500
+    
+    def _prewarm_stream():
+        total = len(ds['images'])
+        skipped = 0
+        computed = 0
+        
+        for idx, im in enumerate(ds['images']):
+            start = time.time()
+            try:
+                # Use content hash as global cache key (works across datasets)
+                content_hash = im.get('content_hash')
+                base_cache_key = f"hash_{content_hash}" if content_hash else f"{ds_id}_img_{im['id']}"
+
+                img = Image.open(im['path']).convert('RGB')
+                arr = np.array(img)
+                h, w = arr.shape[:2]
+                cache_key = f"{base_cache_key}_{w}x{h}"
+
+                # Skip if already cached (from previous upload or prewarm)
+                if cache_key in _EMBEDDING_CACHE:
+                    skipped += 1
+                    elapsed = time.time() - start
+                    yield f'data: {{"index":{idx},"total":{total},"filename":"{im["filename"]}","skipped":true,"ms":{int(elapsed*1000)}}}\n\n'
+                    continue
+
+                # Compute embeddings using full-resolution array for consistency
+                predictor = _SAM_PREDICTOR
+                assert predictor is not None
+                predictor.set_image(arr)
+                _EMBEDDING_CACHE[cache_key] = predictor.features
+                _evict_embedding_cache_if_needed()
+                computed += 1
+                
+                # Mark as cached in database
+                if _USE_DB and _db:
+                    try:
+                        _db.mark_embedding_cached(ds_id, im['id'], True)
+                    except Exception as e:
+                        print(f'[PREWARM] Failed to mark cached: {e}')
+                
+                elapsed = time.time() - start
+                yield f'data: {{"index":{idx},"total":{total},"filename":"{im["filename"]}","computed":true,"ms":{int(elapsed*1000)}}}\n\n'
+            except Exception as e:
+                yield f'data: {{"index":{idx},"total":{total},"filename":"{im["filename"]}","error":"{str(e)}"}}\n\n'
+        
+        yield f'data: {{"done":true,"total":{total},"computed":{computed},"skipped":{skipped},"cache_size":{len(_EMBEDDING_CACHE)}}}\n\n'
+    
+    return Response(stream_with_context(_prewarm_stream()), 
+                   headers={'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache'})
+
 @app.route('/sam/dataset/init', methods=['POST'])
 def dataset_init():
     files = request.files.getlist('images')
@@ -1054,12 +1171,40 @@ def dataset_init():
             continue
     collected = filtered
     images_meta = []
+    duplicate_count = 0
     for p in collected:
         try:
+            # Compute content hash for deduplication
+            with open(p, 'rb') as f:
+                content_hash = hashlib.sha256(f.read()).hexdigest()
+            
+            # Check if this image already has cached embeddings
+            existing = None
+            embedding_cached = 0
+            if _USE_DB and _db:
+                try:
+                    existing = _db.find_image_by_hash(content_hash)
+                    if existing:
+                        duplicate_count += 1
+                        embedding_cached = 1
+                        print(f'[DEDUP] Found duplicate image: {os.path.basename(p)} (hash: {content_hash[:8]}..., cached: {existing["embedding_cached"]})')
+                except Exception as e:
+                    print(f'[DEDUP] Error checking hash: {e}')
+            
             img = Image.open(p).convert('RGB'); w,h = img.size
             t = img.copy(); t.thumbnail((160,160)); buf = io.BytesIO(); t.save(buf, format='PNG')
-            images_meta.append({'id': uuid.uuid4().hex,'filename': os.path.basename(p),'path': p,'w': w,'h': h,'thumb_b64': base64.b64encode(buf.getvalue()).decode('ascii')})
-        except Exception:
+            images_meta.append({
+                'id': uuid.uuid4().hex,
+                'filename': os.path.basename(p),
+                'path': p,
+                'w': w,
+                'h': h,
+                'thumb_b64': base64.b64encode(buf.getvalue()).decode('ascii'),
+                'content_hash': content_hash,
+                'embedding_cached': embedding_cached
+            })
+        except Exception as e:
+            print(f'[UPLOAD] Error processing image {p}: {e}')
             continue
     _DATASETS[ds_id] = {'images': images_meta, 'templates': {}, 'created_at': time.time()}
     if _USE_DB and _db:
@@ -1068,7 +1213,15 @@ def dataset_init():
         except Exception as e:
             print(f'[DB] create_dataset failed: {e}')
     _maybe_cleanup_datasets()
-    return {'dataset_id': ds_id, 'images': [{'id':m['id'],'filename':m['filename'],'thumb_b64':m['thumb_b64']} for m in images_meta]}
+    
+    result = {
+        'dataset_id': ds_id, 
+        'images': [{'id':m['id'],'filename':m['filename'],'thumb_b64':m['thumb_b64'],'embedding_cached':m.get('embedding_cached',0)} for m in images_meta]
+    }
+    if duplicate_count > 0:
+        result['duplicates_found'] = duplicate_count
+        result['duplicates_message'] = f'{duplicate_count} image(s) already cached, prewarm will be faster'
+    return result
 
 @app.route('/sam/dataset/template/save', methods=['POST'])
 def dataset_template_save():
@@ -1090,20 +1243,62 @@ def dataset_template_save():
     if not pts: return {'error':'no_points'}, 400
     name = data.get('name') or 'Template'
     template_class = data.get('class', '')  # 'pass', 'fail', or '' for all
-    # Accept pre-normalized points directly (x_norm, y_norm already calculated by frontend)
-    norm = []
+    image_id = data.get('image_id')
+    image_filename = data.get('image_filename')
+    img_meta = None
+    if ds:
+        if image_id:
+            img_meta = next((im for im in ds['images'] if im.get('id') == image_id), None)
+        if not img_meta and image_filename:
+            img_meta = next((im for im in ds['images'] if im.get('filename') == image_filename), None)
+    width = None
+    height = None
+    if img_meta:
+        width = img_meta.get('w') or img_meta.get('width')
+        height = img_meta.get('h') or img_meta.get('height')
+    if (not width or not height) and img_meta and img_meta.get('path'):
+        try:
+            with Image.open(img_meta['path']) as _img_dim:
+                width, height = _img_dim.size
+        except Exception:
+            width = width or 0
+            height = height or 0
+    norm_points: List[Dict[str, Any]] = []
     for p in pts:
+        if not isinstance(p, dict):
+            continue
         if 'x_norm' in p and 'y_norm' in p:
-            norm.append({'x_norm': float(p['x_norm']), 'y_norm': float(p['y_norm']), 'positive': bool(p.get('positive',True))})
-    if not norm: return {'error':'no_valid_points'}, 400
+            try:
+                xn = float(p['x_norm'])
+                yn = float(p['y_norm'])
+                norm_points.append({
+                    'x_norm': max(0.0, min(1.0, xn)),
+                    'y_norm': max(0.0, min(1.0, yn)),
+                    'positive': bool(p.get('positive', True))
+                })
+            except (TypeError, ValueError):
+                continue
+        elif 'x' in p and 'y' in p and width and height and width > 1 and height > 1:
+            try:
+                xn = float(p['x']) / (float(width) - 1)
+                yn = float(p['y']) / (float(height) - 1)
+                norm_points.append({
+                    'x_norm': max(0.0, min(1.0, xn)),
+                    'y_norm': max(0.0, min(1.0, yn)),
+                    'positive': bool(p.get('positive', True))
+                })
+            except (TypeError, ValueError):
+                continue
+    if not norm_points:
+        return {'error':'no_valid_points'}, 400
     tid = uuid.uuid4().hex
-    ds['templates'][tid] = {'id': tid, 'name': name, 'class': template_class, 'points': norm, 'created_at': time.time()}
+    ds['templates'][tid] = {'id': tid, 'name': name, 'class': template_class, 'points': norm_points, 'created_at': time.time()}
     if _USE_DB and _db:
         try:
-            _db.store_template(ds_id, tid, name, template_class, json.dumps(norm))
+            _db.store_template(ds_id, tid, name, template_class, json.dumps(norm_points))
         except Exception as e:
             print(f'[DB] store_template failed: {e}')
-    return {'template_id': tid, 'name': name, 'class': template_class, 'count': len(norm)}
+    return {'template_id': tid, 'name': name, 'class': template_class, 'count': len(norm_points)}
 
 @app.route('/sam/dataset/templates', methods=['GET'])
 def dataset_templates():
@@ -1145,35 +1340,54 @@ def dataset_point_preview():
     if not img_meta: return {'error':'image_not_found'}, 404
     
     try:
+        print(f"[PREVIEW DEBUG] Points payload sample: {points[:2]}")
         img = Image.open(img_meta['path']).convert('RGB')
-        arr = _maybe_downscale(np.array(img))
-        
-        # Optional downscale for preview speed (keeps aspect ratio, uses proper interpolation)
-        # Previous implementation used np.resize which merely reshaped/repeated data and produced
-        # unrealistic inputs causing the mask to frequently cover the whole image. Using a real
-        # resample prevents that while still reducing compute on very large images.
-        MAX_PREVIEW_DIM = 800
-        h, w = arr.shape[:2]
-        if max(h, w) > MAX_PREVIEW_DIM:
-            scale = MAX_PREVIEW_DIM / max(h, w)
-            new_w = int(w * scale)
-            new_h = int(h * scale)
-            try:
-                resample = Image.Resampling.BILINEAR  # Pillow >= 9
-            except AttributeError:  # Pillow < 9 fallback
-                resample = Image.BILINEAR  # type: ignore
-            img_small = img.resize((new_w, new_h), resample)
-            arr = np.array(img_small)
-            # Points are normalized (0-1) so no coordinate adjustment needed.
-        
-        # Use cache key for embedding reuse
-        cache_key = f"{ds_id}_{image_id}_preview"
-        mask, score = _predict_sam_mask(arr, points, cache_key=cache_key)
+        orig_w, orig_h = img.size
+
+        # Ensure points are normalized for SAM (support legacy pixel payloads)
+        norm_points: List[Dict[str, Any]] = []
+        for p in points:
+            if not isinstance(p, dict):
+                continue
+            if 'x_norm' in p and 'y_norm' in p:
+                try:
+                    norm_points.append({
+                        'x_norm': float(p['x_norm']),
+                        'y_norm': float(p['y_norm']),
+                        'positive': bool(p.get('positive', True))
+                    })
+                except (TypeError, ValueError):
+                    continue
+            elif 'x' in p and 'y' in p and orig_w > 1 and orig_h > 1:
+                try:
+                    norm_points.append({
+                        'x_norm': float(p['x']) / (orig_w - 1),
+                        'y_norm': float(p['y']) / (orig_h - 1),
+                        'positive': bool(p.get('positive', True))
+                    })
+                except (TypeError, ValueError):
+                    continue
+        if not norm_points:
+            return {'error': 'no_valid_points'}, 400
+
+        # SIMPLE APPROACH: Always use full resolution, no downscaling
+        arr = np.array(img)
+        print(f"[PREVIEW DEBUG] Numpy array shape before SAM: {arr.shape}")
+
+        # Use consistent cache key format with dimensions
+        content_hash = img_meta.get('content_hash')
+        cache_key = f"hash_{content_hash}" if content_hash else f"{ds_id}_img_{image_id}"
+
+        mask, score = _predict_sam_mask(arr, norm_points, cache_key=cache_key)
         if mask is None:
             return {'error':'segmentation_failed'}, 500
         
-        # Encode mask as PNG (grayscale 0/255)
-        mask_img = Image.fromarray((mask*255).astype(np.uint8), mode='L')
+        # Return mask at same resolution as input image
+        mask_arr = mask.astype(np.uint8)
+        if mask_arr.shape != (orig_h, orig_w):
+            mask_img = Image.fromarray(mask_arr * 255, mode='L').resize((orig_w, orig_h), Image.NEAREST)
+        else:
+            mask_img = Image.fromarray(mask_arr * 255, mode='L')
         buf = io.BytesIO()
         mask_img.save(buf, format='PNG', compress_level=1)
         return {
@@ -1221,7 +1435,9 @@ def dataset_template_preview():
         img = Image.open(first_img['path']).convert('RGB')
         arr = np.array(img)
         # Apply templates with class filtering - use cache key for embedding reuse
-        cache_key = f"{ds_id}_template_preview_{first_img['id']}"
+        # CRITICAL: Use content hash for global dedup when available
+        content_hash = first_img.get('content_hash')
+        cache_key = f"hash_{content_hash}" if content_hash else f"{ds_id}_img_{first_img['id']}"
         edited, cum_mask = _apply_templates_with_class_filter(arr, ds['templates'], edits, first_img['filename'], cache_key=cache_key)
         if backlight_simulation:
             if cum_mask is None:
@@ -1320,9 +1536,11 @@ def dataset_apply_stream():
             out = {'index': idx, 'total': total, 'filename': im['filename'], 'image_id': im['id']}
             try:
                 img = Image.open(im['path']).convert('RGB')
-                arr = _maybe_downscale(np.array(img))
-                # Apply templates with class filtering - use cache key for embedding reuse
-                cache_key = f"{ds_id}_gen_{im['id']}"
+                # SIMPLE APPROACH: Always use full resolution for consistency
+                arr = np.array(img)
+                # Apply templates with class filtering - use consistent cache key
+                content_hash = im.get('content_hash')
+                cache_key = f"hash_{content_hash}" if content_hash else f"{ds_id}_img_{im['id']}"
                 edited, cum_mask = _apply_templates_with_class_filter(arr, ds['templates'], edits, im['filename'], cache_key=cache_key)
                 out_bytes = _output_image_bytes(edited)
                 if backlight_simulation:
